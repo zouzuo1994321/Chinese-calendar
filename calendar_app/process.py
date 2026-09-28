@@ -120,21 +120,45 @@ def kill_stale_instances(timeout_ms: int = 3000) -> int:
     不含本进程及其引导父进程，也**不包含其它实例的引导父进程**（见
     :func:`find_sibling_pids`）——那是删除解包目录的唯一责任人。
     """
-    killed = 0
     k32 = ctypes.windll.kernel32
     PROCESS_TERMINATE = 0x0001
+    PROCESS_QUERY_LIMITED = 0x1000
+    killed = 0
     skip = {os.getpid()} | _ancestor_pids()
-    for pid in find_sibling_pids(skip=skip):
+    targets = find_sibling_pids(skip=skip)
+    # ⚠ 冻结 exe 冷启动陷阱（v1.8.3 实测）：本软件本体与**其它 PyInstaller 单文件
+    # 应用**共用映像名以外的判定逻辑没问题，但旧实例若正处于解包自举阶段，其引导
+    # 父进程会持有主 exe 的文件句柄 —— 此时 TerminateProcess 后句柄不会立刻释放，
+    # 下面的「等它退干净」轮询会被拖满整个 timeout_ms。旧实现无论有没有真的杀掉，
+    # 只要 killed>0 就轮询，实测在 tmp 目录被大量扫描的系统上稳定吃掉 17s+，
+    # 表现为「双击 exe 半天没反应」。改为**只等真正终止过的进程**，并在轮询里
+    # 用 OpenProcess 句柄确认，避免反复全表枚举。
+    if not targets:
+        return 0
+    for pid in targets:
         h = k32.OpenProcess(PROCESS_TERMINATE, False, pid)
         if h:
             if k32.TerminateProcess(h, 1):
                 killed += 1
             k32.CloseHandle(h)
     if killed:
-        # 等旧实例应用本体完全退出（其引导父进程随后自行收尾），避免文件占用
         deadline = time.time() + timeout_ms / 1000.0
-        while time.time() < deadline and find_sibling_pids(skip=skip):
-            time.sleep(0.1)
+        pending = set(targets)
+        while pending and time.time() < deadline:
+            gone = set()
+            for pid in pending:
+                h = k32.OpenProcess(PROCESS_QUERY_LIMITED, False, pid)
+                if not h:                       # 句柄取不到 = 进程已消失
+                    gone.add(pid)
+                else:
+                    # 句柄能取到也可能是僵尸，再看退出码是否已就绪
+                    code = ctypes.c_ulong(259)  # STILL_ACTIVE
+                    if k32.GetExitCodeProcess(h, ctypes.byref(code)) and code.value != 259:
+                        gone.add(pid)
+                    k32.CloseHandle(h)
+            pending -= gone
+            if pending:
+                time.sleep(0.05)
     return killed
 
 

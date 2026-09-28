@@ -44,12 +44,17 @@ def _logo_path():
 
 def main():
     _beacon("enter-main frozen=%s" % getattr(sys, "frozen", False))
-    try:
-        killed = kill_stale_instances()
-        _beacon("kill-stale done killed=%d" % killed)
-    except Exception as ex:
-        _beacon("kill-stale EXC %r" % (ex,))
-        killed = 0
+    # 残留进程清理放到窗口显示之后再跑：它的唯一作用是「让旧实例腾开文件句柄」，
+    # 对本次启动的界面没有任何依赖。放在最前面会让冷启动被最坏情况下的进程轮询
+    # 拖住（v1.8.3 实测曾吃掉 17s+，用户观感就是「双击没反应」）。
+    _stale = {"killed": 0}
+
+    def _background_kill():
+        try:
+            _stale["killed"] = kill_stale_instances()
+        except Exception as ex:          # noqa: BLE001 —— 清理失败绝不能影响主流程
+            _beacon("kill-stale EXC %r" % (ex,))
+        _beacon("kill-stale done killed=%d" % _stale["killed"])
 
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
@@ -79,6 +84,8 @@ def main():
     _beacon("MainWindow built")
     win.show()
     _beacon("window shown")
+    # 界面已经可见，此时再去清残留进程，用户感知不到任何延迟
+    threading.Thread(target=_background_kill, daemon=True).start()
 
     # 自动化验证用：SYY_AUTOQUIT_MS=毫秒 时到点自动正常退出（用于校验单文件 exe 的
     # 干净退出与 %TEMP%\\_MEIxxxxxx 回收；不设该变量时对正常使用无任何影响）。

@@ -62,21 +62,37 @@ def build_charset():
 
 
 def set_names(font, family, weight):
-    """把实例化后的字体命名固定为『族名 + 字重』，保证 Qt 能按字重匹配。"""
+    """把实例化后的字体命名固定为『族名 + 字重』，保证 Qt 能按字重匹配。
+
+    ⚠ 必须同时改写 **nameID 6（PostScript 名）与 nameID 3（唯一标识）**：
+    `instantiateVariableFont(..., updateFontNames=False)` 会把可变字体的原始
+    PS 名原样带过来，于是 Regular / Bold / Black 三份的 PS 名**完全相同**
+    （实测都是 `NotoSerifSC-ExtraLight`，Sans 三份都是 `NotoSansSC-Thin`）。
+    Windows / Qt 以 PS 名作为字体的注册键，重名会让三个字重相互覆盖 ——
+    表现为「请求 Bold / Black 全部落到同一个面」，页头英文怎么调都不变粗
+    （v1.8.2 真实运行环境的根因，离屏渲染恰好不受影响，所以此前没暴露）。
+    """
     style = WEIGHT_NAME.get(weight, "Regular")
+    ps_name = "%s-%s" % (family.replace(" ", ""), style)
     for rec in font["name"].names:
         if rec.nameID == 1:
             rec.string = family
         elif rec.nameID == 2:
             rec.string = style
+        elif rec.nameID == 3:                      # 唯一标识（必须逐字重不同）
+            rec.string = "%s %s;%s" % (family, style, ps_name)
         elif rec.nameID == 4:
             rec.string = "%s %s" % (family, style)
+        elif rec.nameID == 6:                      # PostScript 名（重名元凶）
+            rec.string = ps_name
         elif rec.nameID == 16:
             rec.string = family
         elif rec.nameID == 17:
             rec.string = style
     if "OS/2" in font:
         font["OS/2"].usWeightClass = weight
+    if "head" in font:                             # 微调字体版本，避开系统缓存
+        font["head"].fontRevision = 1.0
 
 
 def build_one(src_name, family, weights, charset):

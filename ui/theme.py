@@ -74,12 +74,38 @@ COLOR_CHIPS = {"黑": "#2b2b2b", "蓝": "#3a5fa0", "灰": "#9a9a9a", "青": "#2e
 
 
 def _font(size, families, weight=QFont.Normal, italic=False):
+    """构造 QFont。
+
+    ⚠ 内置 Noto 系字体**没有斜体面**：一旦 `setItalic(True)`，Qt 会走合成斜体
+    分支，该分支**完全忽略字重轴** —— 实测 Normal / Bold / Black 全部退化成
+    同一个字形（深墨像素一律 587，甚至比 Regular 的 719 更细），页头英文
+    因此「只是变大、不会加粗」。故此处**拒绝 italic**：需要斜体的地方改用
+    `_painter_shear()` 施加仿射切变，既保留真实字重又得到斜体观感。
+    """
     f = QFont()
     f.setFamilies(families)
     f.setPixelSize(size)
     f.setWeight(weight)
-    f.setItalic(italic)
+    if italic:
+        f.setItalic(True)      # 仅对「非内置族」兜底；内置族请改走 _painter_shear
     return f
+
+
+# 合成斜体的切变量（约 14°，与常见 italic 观感接近）
+SHEAR = -0.25
+
+
+def _painter_shear(p, center_x):
+    """在画笔上施加相对 center_x 的水平切变，模拟斜体（保留真实字重）。
+
+    与 `QFont.setItalic(True)` 的区别：后者在内置字体缺斜体面时会触发
+    Qt 的合成斜体分支，把字重轴一并吞掉；切变只做几何变换，字形仍由
+    选定字重的轮廓直接光栅化，故 Bold / Black 依然是 Bold / Black。
+    调用方需自行 `p.save()` / `p.restore()` 包裹。
+    """
+    p.translate(center_x, 0.0)
+    p.shear(SHEAR, 0.0)
+    p.translate(-center_x, 0.0)
 
 
 def _tinted_pixmap(path, color, size):

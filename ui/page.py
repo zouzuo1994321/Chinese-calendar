@@ -4,18 +4,18 @@ import os
 from datetime import date, datetime
 
 from PySide6.QtCore import QPoint, QRect, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import (QBrush, QColor, QFont, QLinearGradient, QPainter,
-                           QPen)
+from PySide6.QtGui import (QBrush, QColor, QFont, QFontMetricsF, QLinearGradient,
+                           QPainter, QPen)
 from PySide6.QtWidgets import QComboBox, QPushButton, QSlider, QWidget
 
 from calendar_app import fonts as calendar_app_fonts
 from calendar_app.engine import get_day_info, SHENGXIAO_LIST
 from calendar_app import version as VER
 
-from ui.theme import (COLOR_CHIPS, _font, _lf_asset, _paper_pixmap, _pix_cached,
-                      _pix_scaled, _tone_of, palette_for, use_builtin_fonts,
-                      EN_FONT, IMG_BAGUA, INK, NUM_FONT, PAPER_EDGE,
-                      ZH_FONT, ZH_SONG, ZH_WISDOM, _ZODIAC_DIR)
+from ui.theme import (COLOR_CHIPS, _font, _lf_asset, _painter_shear, _paper_pixmap,
+                      _pix_cached, _pix_scaled, _tone_of, palette_for,
+                      use_builtin_fonts, EN_FONT, IMG_BAGUA, INK, NUM_FONT,
+                      PAPER_EDGE, SHEAR, ZH_FONT, ZH_SONG, ZH_WISDOM, _ZODIAC_DIR)
 
 
 class CalendarPage(QWidget):
@@ -28,6 +28,19 @@ class CalendarPage(QWidget):
     NUM_FONT_PX = 168
     NUM_RECT = QRect(66, 110, 392, 186)
     NUM_SHADOW_RECT = QRect(72, 116, 392, 186)
+    # 页头英文月份基准字号（粗斜体；长月名超宽时整字等比收敛，见 _paint_header）
+    # v1.8.5：26 → 21px。26px 时 SEPTEMBER 经切变后实测需 185.5px，
+    # 几乎顶满 196px 可用区、视觉上「出框」；21px 下最宽 SEPTEMBER 仅 128px，留足余量。
+    EN_MONTH_PX = 21
+    # 页头英文月份可用区。
+    # ⚠ left 必须补偿**切变造成的左移量**（v1.8.6 修复「英文仍在框外」）：
+    # 切变以 area.left() 为轴、SHEAR=-0.25，字形顶部向左倾 |SHEAR|×ascent = 6px，
+    # 加上字形本身左缘倾斜，实测整条月名的墨迹左缘会比 area.left 再左移约 20px。
+    # 原先 left=36 时 SEPTEMBER 左缘落到 x=16，而页边内框线在 x=21 —— 视觉上「字顶出框」，
+    # 用户明确反馈「应该往右移动」。left=50 后左缘落 x=30，内框线内侧留 9px 余量。
+    EN_MONTH_RECT = (50, 56, 180, 40)
+    # 月名墨迹允许的最左位置（页边内框线 21 + 安全余量）；低于此值即为出框，由断言守住
+    EN_MONTH_MIN_X = 26
     # 数字斜向高光流动参数（左上 → 右下，缓慢、克制）
     SHEEN_PERIOD_MS = 4800        # 一轮扫过时长
     SHEEN_TICK_MS = 33            # ≈30fps
@@ -322,12 +335,43 @@ class CalendarPage(QWidget):
     def _paint_header(self, p):
         info = self.info
         main, dark = self.P["main"], self.P["dark"]
-        # 左：英文月份（无框直印）
+        # 左：英文月份（无框直印，粗斜体）
+        # 字重取内置 Noto Serif SC 的 Black（900）实例；字号按最长月名自动收敛，
+        # 避免旧逻辑「长月名缩到 20px、短月名留 26px」造成的忽大忽小。
+        #
+        # ⚠ 斜体必须用 `_painter_shear()` 而不是 `_font(..., italic=True)`：
+        # 内置 Noto 系没有斜体面，setItalic(True) 会触发 Qt 的合成斜体分支，
+        # 该分支忽略字重轴 → Bold / Black 全退化成同一字形（实测深墨 587，
+        # 比 Regular 的 719 还细），页头英文因此「只是变大、不会加粗」。
+        # 切变只做几何变换，字重轮廓照常光栅化，故加粗真实生效。
         p.setPen(QPen(dark))
         month = info["month_en"]
-        msize = 26 if len(month) <= 6 else 20
-        p.setFont(_font(msize, EN_FONT, QFont.Black, italic=True))
-        p.drawText(QRect(34, 52, 196, 46), Qt.AlignVCenter | Qt.AlignLeft, month)
+        area = QRect(*self.EN_MONTH_RECT)
+        font = _font(self.EN_MONTH_PX, EN_FONT, QFont.Black)
+        fm = QFontMetricsF(font)
+        # 宽度判断：切变会让字形底部向右伸出 |SHEAR| × descent，故可用宽要扣掉这段。
+        shear_extra = abs(SHEAR) * (fm.ascent() + fm.descent())
+        adv = fm.horizontalAdvance(month)
+        if adv > area.width() - shear_extra:        # 超宽则整字缩放，保持同族同字重
+            font.setPixelSize(max(11, int(self.EN_MONTH_PX
+                                           * (area.width() - shear_extra) / adv)))
+            fm = QFontMetricsF(font)
+        # ⚠ 水平位置：`area.left()` 同时是**切变轴**。切变把字形顶部向左倾
+        # |SHEAR| × ascent（实测 21px 下 6px），叠加字形自身的左缘倾斜后，
+        # 整条月名的墨迹左缘会比 area.left 再左移约 20px。故 left 已从 36 提到 50
+        # （见 EN_MONTH_RECT），使墨迹左缘落回内框线内侧（实测 x=30，内框线 21）。
+        # 这里额外做一次**兜底右移**：若当前字号下估算的左缘仍可能压到
+        # EN_MONTH_MIN_X，就按差额把绘制矩形整体右移，保证任何月名都不出框。
+        left_x = area.left()
+        est_left = left_x - abs(SHEAR) * fm.ascent()     # 顶部左倾量
+        if est_left < self.EN_MONTH_MIN_X:
+            left_x += self.EN_MONTH_MIN_X - est_left
+        p.save()
+        _painter_shear(p, left_x)                   # 以（已校正的）文字左缘为轴切变
+        p.setFont(font)
+        p.drawText(QRect(left_x, area.top(), area.width(), area.height()),
+                   Qt.AlignVCenter | Qt.AlignLeft, month)
+        p.restore()
         # 中：年份（无框直印，全软件居中）
         p.setFont(_font(36, NUM_FONT, QFont.Black))
         p.setPen(QPen(main))
@@ -355,26 +399,53 @@ class CalendarPage(QWidget):
         p.drawText(QRect(34, 100, 210, 18), Qt.AlignLeft | Qt.AlignVCenter, left)
         p.drawText(QRect(276, 100, 210, 18), Qt.AlignRight | Qt.AlignVCenter, right)
 
+    # 箴 / 谶 竖排正文：每列最多 5 字、最多 2 列（即最多显示 10 字）
+    WIS_MAX_ROWS = 5
+    WIS_MAX_COLS = 2
+
+    @staticmethod
+    def _wisdom_chars(text):
+        """取箴 / 谶正文用于竖排的字符：剔除标点与空白，超长按上限截断。
+
+        新库（v1.8.2）条目短至 5 字、长至 13 字，故**不再固定两列**，
+        改为按实际字数决定列数并在两列间**居中留白**，避免出现空列 / 半个空块。
+        """
+        chars = [c for c in text if c not in "，。；、！？— "]
+        return chars[:CalendarPage.WIS_MAX_ROWS * CalendarPage.WIS_MAX_COLS]
+
+    def _paint_wisdom(self, p, cols, tag, text, dark, main):
+        """绘制一侧（箴 或 谶）：标题居中于双列块上方，正文竖排、自左向右读。"""
+        chars = self._wisdom_chars(text)
+        if not chars:
+            return
+        rows = self.WIS_MAX_ROWS
+        ncols = 1 if len(chars) <= rows else 2
+        y0 = 134
+        bx = (cols[0] + cols[1]) // 2            # 双列块中心
+        p.setFont(_font(24, ZH_FONT, QFont.Black))
+        p.setPen(QPen(dark))
+        p.drawText(QRect(bx - 14, y0, 28, 30), Qt.AlignCenter, tag)
+        p.setFont(_font(18, ZH_WISDOM, QFont.DemiBold))
+        p.setPen(QPen(main))
+        for i, ch in enumerate(chars):
+            col, row = i // rows, i % rows
+            if ncols == 1:
+                # 单列：直接落在双列块中心，视觉上与标题对齐
+                x = bx
+            else:
+                x = cols[col]
+            p.drawText(QRect(x - 12, y0 + 34 + row * 22, 24, 22),
+                       Qt.AlignCenter, ch)
+
     def _paint_big_day(self, p):
         info = self.info
         main, dark = self.P["main"], self.P["dark"]
         # 左右竖排：箴言（左）/ 谶言（右），无框直印
-        # 箴/谶 标题在双列块顶部水平居中；正文两列、自左向右读，字号锁定 18
+        # 箴/谶 标题在双列块顶部水平居中；正文竖排、自左向右读，字号锁定 18
         wis = info.get("wisdom") or {}
         for cols, tag, text in [((38, 62), "箴", wis.get("zhenyan", "")),
                                 ((456, 480), "谶", wis.get("chenyan", ""))]:
-            chars = [c for c in text if c not in "，。；、！？— "][:10]
-            y0 = 134
-            bx = (cols[0] + cols[1]) // 2   # 双列块中心
-            p.setFont(_font(24, ZH_FONT, QFont.Black))
-            p.setPen(QPen(dark))
-            p.drawText(QRect(bx - 14, y0, 28, 30), Qt.AlignCenter, tag)
-            p.setFont(_font(18, ZH_WISDOM, QFont.DemiBold))
-            p.setPen(QPen(main))
-            for i, ch in enumerate(chars):
-                col, row = i // 5, i % 5
-                p.drawText(QRect(cols[col] - 12, y0 + 34 + row * 22,
-                                 24, 22), Qt.AlignCenter, ch)
+            self._paint_wisdom(p, cols, tag, text, dark, main)
         # 巨大数字（印影 + 主印）
         p.setFont(_font(self.NUM_FONT_PX, NUM_FONT, QFont.Black))
         p.setPen(QPen(QColor(main.red(), main.green(), main.blue(), 60)))
@@ -436,7 +507,8 @@ class CalendarPage(QWidget):
         p.drawRect(340, y, 150, h)
         p.setFont(_font(22, ZH_FONT, QFont.Black))
         p.drawText(QRect(340, y + 3, 150, 28), Qt.AlignCenter, info["week_cn"])
-        p.setFont(_font(11, EN_FONT, QFont.Bold))
+        # 英文星期：与页头月名同字重（内置 Black），避免一处粗一处细
+        p.setFont(_font(11, EN_FONT, QFont.Black))
         p.drawText(QRect(340, y + 33, 150, 18), Qt.AlignCenter, info["week_en"])
 
     @staticmethod
@@ -721,10 +793,24 @@ class CalendarPage(QWidget):
         p.restore()
 
     def _paint_footer(self, p):
+        # 版权行：英文品牌名（Copyright 2026 肆月Aperture）加粗，中文说明保持常规字重，
+        # 既满足「英文加粗」，又保住这行的弱化观感（浅灰、不能抢主体）。
+        base = QColor("#7a7a6e")
+        rect = QRect(0, self.PAGE_H - 70, self.PAGE_W, 16)
+        brand = VER.COPYRIGHT
+        tail = " ｜ %s" % VER.LICENSE_NOTE
+        fm = QFontMetricsF(_font(10, ZH_FONT))
+        fm_b = QFontMetricsF(_font(10, ZH_FONT, QFont.Bold))
+        w_brand = fm_b.horizontalAdvance(brand)
+        w_tail = fm.horizontalAdvance(tail)
+        x0 = rect.left() + (rect.width() - (w_brand + w_tail)) / 2.0
+        p.setPen(QPen(base))
+        p.setFont(_font(10, ZH_FONT, QFont.Bold))
+        p.drawText(QRectF(x0, rect.top(), w_brand, rect.height()),
+                   Qt.AlignLeft | Qt.AlignVCenter, brand)
         p.setFont(_font(10, ZH_FONT))
-        p.setPen(QPen(QColor("#7a7a6e")))
-        p.drawText(QRect(0, self.PAGE_H - 70, self.PAGE_W, 16),
-                   Qt.AlignCenter, "%s ｜ %s" % (VER.COPYRIGHT, VER.LICENSE_NOTE))
+        p.drawText(QRectF(x0 + w_brand, rect.top(), w_tail, rect.height()),
+                   Qt.AlignLeft | Qt.AlignVCenter, tail)
         # 底部双击按钮：本月行事历 / 本日行事历（双击开 / 关对应面板）
         main = self.P["main"]
         for rect, text, visible in [

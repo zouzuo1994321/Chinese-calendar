@@ -82,6 +82,32 @@ t6 = table((1, 0, SH), (2, 1, "python.exe"), (3, 2, EXE), (4, 3, EXE))
 ck("祖先链上溯 {3,2,1}", P._ancestor_pids_from(t6, start=4) == {3, 2, 1},
    "得到=%s" % sorted(P._ancestor_pids_from(t6, start=4)))
 
+# --- 场景 6b：无残留时 kill_stale_instances 必须立即返回（不得无条件轮询） ---
+# v1.8.3 线上事故：旧实现只要 killed>0 就轮询 timeout_ms，实测冷启动被拖 17s+，
+# 用户观感是「双击 exe 没反应」。这里钉死「没有目标 → 立即返回」这一性质。
+_orig_find = P.find_sibling_pids
+P.find_sibling_pids = lambda *a, **k: []
+_t0 = time.time()
+_k0 = P.kill_stale_instances(timeout_ms=3000)
+_dt = time.time() - _t0
+ck("无残留时 kill_stale_instances 立即返回（<0.2s）", _dt < 0.2 and _k0 == 0,
+   "耗时=%.3fs killed=%d" % (_dt, _k0))
+P.find_sibling_pids = _orig_find
+
+# --- 场景 6c：main.py 必须把残留清理放到窗口显示之后（保住冷启动速度） ---
+import inspect                                             # noqa: E402
+import main as _M                                          # noqa: E402
+_msrc = inspect.getsource(_M.main)
+_show_at = _msrc.find("win.show()")
+_kill_at = _msrc.find("Thread(target=_background_kill")
+ck("main.py：清残留晚于 win.show()（冷启动不被阻塞）",
+   0 <= _show_at < _kill_at, "show@%d kill-thread@%d" % (_show_at, _kill_at))
+ck("main.py：清残留跑在守护线程里", "Thread(target=_background_kill" in _msrc)
+ck("main.py：不再在 QApplication 之前同步调用 kill_stale_instances",
+   "app = QApplication" in _msrc
+   and _msrc.index("app = QApplication") < _msrc.find("target=_background_kill"),
+   "同步调用点已移除")
+
 # --- 场景 7：孤儿解包目录自愈清理 ---
 BOX = make_box("_cleanup_case")     # 退出时自动回收，不再累积在 build/
 old_mei = os.path.join(BOX, "_MEIabc111")

@@ -4,6 +4,88 @@
 
 ## 版本历史
 
+### v1.8.6 (Build 2609280027) — 2026-09-28
+
+- **修复页头英文月份「仍然出框」**（用户二次反馈，明确指出「应该是往右边移动」）。**v1.8.5 没修对方向**——当时只盯了「右边会不会超宽」，而真正的现象是**左边压线**：
+
+  - **真正根因**：`_paint_header` 用 `_painter_shear()` 做切变（`SHEAR = -0.25`），且**以 `area.left()` 为切变轴**。切变让字形顶部向左倾 `|SHEAR| × ascent`，叠加字形自身左缘的倾斜后，**整条月名的墨迹左缘会比 `area.left` 再左移约 20px**。原先 `EN_MONTH_RECT` 的 `left = 36`，于是 `SEPTEMBER` 的墨迹左缘落到 **x=16**，而页边**内框线在 x=21** —— 文字直接压到框线外侧，就是用户反复看到并两次截图标红的「出框」。
+  - **为什么 v1.8.5 没解决**：那一版只改了「宽度判断要扣掉切变溢出」和「字号 26 → 21」，**完全没有检查左边界**；断言也只写了 `adv + shear_extra <= width`，同样是只管右边。方向判断错了，改再多也不会好。
+  - **修法（三处）**：
+    - `EN_MONTH_RECT` 的 left **36 → 50**，把切变造成的左移量补偿回来（实测墨迹左缘落回 x=30）；
+    - 新增常量 `EN_MONTH_MIN_X = 26`（内框线 21 + 5px 安全余量）；
+    - `_paint_header` 增加**左缘兜底右移**分支：若按 `|SHEAR| × ascent` 估算的左缘仍低于 `EN_MONTH_MIN_X`，就按差额把绘制矩形整体右移，保证任何月名、任何字号下都不压线。
+  - **实测**：12 个月名墨迹左缘 **27~31**（全部 ≥ 26，内框线在 21，留 5px 以上余量），最右 167（年份区起点约 180，无侵占）。加粗与斜体观感不变。
+- **补上真正管用的断言**（`verify_ui.py` **76/76 → 78/78**）——两条都针对「左边界」，这是前两版一直缺的：
+  - **`[8]` 真实渲染量测**：把月名单独画到空白画布（**不叠加整页**，否则页边外框 x=14 / 内框 x=21 会混进墨迹统计，早期就因此把 12 个月名都「量」成 x=14），逐像素求墨迹包围盒，断言**左缘 ≥ `EN_MONTH_MIN_X`**。
+  - **`[8]` 源码断言**：要求 `_paint_header` 必须含左缘兜底右移分支（`EN_MONTH_MIN_X` + `est_left`），防止有人回退。
+- **验证**：`verify_ui.py` **78/78** ✓ · `font_weight_probe.py`（真实平台）**5/5** ✓ · `test_process.py` **18/18** ✓ · `ui_agenda_probe.py` **43/43** ✓ · `agenda_checks.py` **34/34** ✓ · pyflakes 零输出 ✓。
+- **教训**：**几何缺陷必须"四个边界"一起量**。前两版盯着字宽算，漏了水平起点；断言也只覆盖了「不超宽」。凡涉及切变 / 倾斜 / 描边这类几何变换，右侧溢出、**左侧溢出**、基线位置都要各自断言，且**只能用真实渲染量测**，抽象估算（advance、估算左缘）在这个问题上连续骗过两次。
+- **改动文件**：`ui/page.py`（`EN_MONTH_RECT` left 36→50、新增 `EN_MONTH_MIN_X`、`_paint_header` 加左缘兜底分支）、`tools/dev_checks/verify_ui.py`（+2 条断言）、`calendar_app/version.py`、`CHANGELOG.md` / `README.md`。
+
+### v1.8.5 (Build 2609280026) — 2026-09-28
+
+- **修复页头英文月份「加粗后出框」**（用户反馈：v1.8.4 的加粗已生效，但 `SEPTEMBER` / `OCTOBER` 撑出了可用区）。这是 v1.8.4 那轮改动的**副作用**——当时为了消除"加粗不明显"把基准字号定到 26px，并只按字形的**几何 advance** 判断是否放得下：
+
+  - **根因**：页头月名走 `_painter_shear()` 做仿射切变（`SHEAR = -0.25`）模拟斜体。切变以文字左缘为轴，字形**底部向右伸出 `|SHEAR| × descent`、顶部向左伸出 `|SHEAR| × ascent`**。而旧代码只比较 `horizontalAdvance(month) <= area.width()`：26px 的 `SEPTEMBER` advance = 178px、可用 196px，**判断为"放得下"**，但加上切变溢出 7.5px 后实际渲染 185.5px，左缘已顶到页边内框线——用户看到的就是出框。
+  - **修法（两处）**：① `ui/page.py` 把**切变溢出量计入宽度判断**（`avail = area.width() - abs(SHEAR) × (ascent+descent)`），超宽才等比缩字号；② 基准字号 **26 → 21px**（`EN_MONTH_PX`），并把页头月名可用区提为常量 `EN_MONTH_RECT = (36, 56, 190, 40)` 便于断言与调参。
+  - **实测**：21px 下最宽 `SEPTEMBER` = 128px + 切变 7.5px = **135.5px / 可用 182.5px**（余量 47px），12 个月名全部从容放下，加粗与斜体观感不变（`font_weight_probe.py` 仍 **5/5**：切变后 Normal=869 / Black=1341，**+54%**）。
+- **删除 3 条超 10 字的箴言**（用户点名）——竖排区块上限是 **5 行 × 2 列 = 10 字**，超出的会被 `_wisdom_chars()` 静默截断、条目显示不全：
+  - `忍耐是金，退一步海阔天空。`（11 字）
+  - `岁寒，然后知松柏之后凋也。`（12 字）
+  - `三军可夺帅也，匹夫不可夺志也。`（13 字）
+  - 箴言库 **60 → 57 条**；谶言库保持 60 条。⚠ 两库长度**不再相等**，`get_daily_wisdom()` 文档字符串里"组合周期 = 60 天"的说法已作废并更正（两库周期分别 57 / 60 天，最小公倍数 1140 天）。
+- **新增护栏**（`verify_ui.py` **74/74 → 76/76**）：
+  - `[9]` 组**新增「全部条目字数 ≤10」硬断言**——这是本次问题的直接护栏，以后新增条目超限会立刻红；
+  - `[9]` 组条目计数断言改为实际值（箴 57 / 谶 60），避免有人"顺手补齐"又把超长条目塞回来；
+  - `[8]` 组「月名不超页头可用宽」断言**修正为真实几何口径**（原先硬编码 196px 且未计切变，正是它放过了本次 bug），并新增一条「绘制代码必须把切变溢出计入宽度判断」的源码断言。
+- **验证**：`verify_ui.py` **76/76** ✓ · `font_weight_probe.py`（真实平台）**5/5** ✓ · `test_process.py` **18/18** ✓ · `ui_agenda_probe.py` **43/43** ✓ · `agenda_checks.py` **34/34** ✓ · pyflakes 零输出 ✓。
+- **改动文件**：`ui/page.py`（`EN_MONTH_PX` 26→21 + 新增 `EN_MONTH_RECT` + `_paint_header` 计入切变溢出 + 导入 `SHEAR`）、`calendar_app/engine.py`（删 3 条箴言 + 文档字符串更正）、`tools/dev_checks/verify_ui.py`（+2 条断言、修正 1 条）、`calendar_app/version.py`、`CHANGELOG.md` / `README.md`。
+
+### v1.8.4 (Build 2609280025) — 2026-09-28
+
+- **修复「双击 exe 后长时间没反应」的启动卡顿**。一次冻结冒烟里，从 `enter-main` 到窗口显示耗时异常，逐段计时后定位到 **`kill_stale_instances()` 会无条件吃满超时预算**：
+
+  - **现象**：`main()` 第一行的路标 `enter-main` 与后续路标之间被拖住 **17s+**（另一次实测整体 30s+），用户观感就是「双击了没动静」，容易误判为程序没启动而反复双击。源码模式（非冻结）启动仅 **1.4s**，说明是冻结 exe 特有路径。
+  - **根因**：旧实现是 `if killed:` 就进入等待循环 —— **只要杀过任何一个残留进程，无论对方是否真的还活着**，都会一路轮询到 `timeout_ms`（默认 3s，叠加多次进程表全量枚举后实际远超）。而残留清理的唯一作用是「让旧实例腾开文件句柄」，**对本实例的界面没有任何依赖**，放在 `QApplication` 之前同步执行纯属自找阻塞。
+  - **修法（两处）**：
+    - `calendar_app/process.py`：`kill_stale_instances()` 改为**只等待真正被终止过的 PID**，且轮询不再反复全表枚举，改用 `OpenProcess(PROCESS_QUERY_LIMITED)` + `GetExitCodeProcess` 判定单个进程是否已消失（句柄取不到 = 已退出；取到则看退出码是否已脱离 `STILL_ACTIVE`），**无目标时直接返回 0**。
+    - `main.py`：把残留清理**整体移到 `win.show()` 之后**，并放进守护线程执行（`_background_kill`）。界面先可见，清理在后台补做，用户感知不到任何延迟。
+  - **实测**：`window shown` → `kill-stale done` 仅 **0.10s**（旧实现同一路径 17s+）；单实例下 `kill_stale_instances()` 直调 **0.012s**。
+- **新增针对启动阻塞的回归断言**（`tools/dev_checks/test_process.py` 由 **14/14** 扩到 **18/18**）：
+  - 无残留时 `kill_stale_instances(timeout_ms=3000)` 必须 **< 0.2s** 返回（钉死「不得无条件轮询」，本次事故的直接护栏）；
+  - `main.py` 静态检查三条：清残留**晚于** `win.show()`、跑在**守护线程**里、`QApplication` 之前**不得**再有同步调用点。
+- **验证**：`verify_ui.py` **74/74** ✓、`font_weight_probe.py`（真实平台）**5/5** ✓、`test_process.py` **18/18** ✓、`ui_agenda_probe.py` **43/43** ✓、`agenda_checks.py` **34/34** ✓。
+- **附带清理**：`%TEMP%` 下积累了 **4 个泄漏的 `_MEI` 解包目录（约 2.07 GB）**——它们是此前若干次冒烟里引导进程被强杀、没能完成回收留下的（引导进程负责删解包目录，被 `taskkill` 掉就没机会删）。已清理。**注意**：这些目录会拖慢冷启动（系统要扫描/杀软要实时扫描），若你自己机器上 `%TEMP%` 里也堆了 `_MEI*`，可放心手动删除（本程序的「自愈清理」线程也会在启动后自动回收超过 10 分钟的旧目录）。
+- **改动文件**：`calendar_app/process.py`（`kill_stale_instances` 重写等待逻辑）、`main.py`（清理迁移到窗口显示后的后台线程）、`tools/dev_checks/test_process.py`（+4 条断言）、`calendar_app/version.py`、`CHANGELOG.md` / `README.md`。
+
+### v1.8.3 (Build 2609280024) — 2026-09-28
+
+- **修复「英文加粗在真实运行环境中失效」**（用户反馈：截图里看着是粗的，实际运行只是变大没变粗）。这是一处**离屏测试照不到的盲区**，根因有两层，都在字体注册层面：
+
+  - **① 内置字体的 PostScript 名重复（主因）**。`tools/build_fonts.py` 的 `set_names()` 只改写了 nameID 1/2/4/16/17，**漏了 nameID 6（PostScript 名）与 nameID 3（唯一标识）**。而 `instancer.instantiateVariableFont(..., updateFontNames=False)` 会把可变字体的原始 PS 名原样带过来，于是：
+    ```
+    NotoSerifSC-Regular.ttf / -Bold.ttf / -Black.ttf  →  nameID 6 全是 NotoSerifSC-ExtraLight
+    NotoSansSC-Regular.ttf  / -Bold.ttf               →  nameID 6 全是 NotoSansSC-Thin
+    ```
+    **Windows / Qt 以 PostScript 名作字体注册键**，三份重名的字重相互覆盖 —— 请求 `Bold` / `Black` 全部落回同一个面（实测深墨像素 Normal=719、Bold=587、Black=587，加粗后反而更细），页头英文因此怎么调都不变粗。**`QT_QPA_PLATFORM=offscreen` 恰好不读这条路径**，所以 v1.8.2 的 61/61 全绿却完全掩盖了线上问题。
+    - 修法：`set_names()` 补上 nameID 3 / 6 的写入（逐字重唯一），另加 `tools/fix_font_names.py` 可对**已构建的字体就地修复**、无需源可变字体；5 份字体已修复，实测 `Noto Serif SC` 恢复 Normal=719 → Bold=982 → Black=1149（**+60%**）。
+  - **② `QFont.setItalic(True)` 会吞掉字重轴（次因）**。内置 Noto 系**没有斜体面**，一旦 `setItalic(True)`，Qt 走合成斜体分支、**完全忽略字重轴** —— Normal / Bold / Black 全部退化成同一字形（实测三者深墨一律 **587**，比 Regular 的 719 还细）。页头月名原本写 `_font(..., italic=True)`，恰好踩中。
+    - 修法：`ui/theme.py` 新增 `_painter_shear(p, center_x)`，用画笔仿射切变（`SHEAR = -0.25`，约 14°）模拟斜体 —— 只做几何变换，字形仍按选定字重光栅化，**字重真实保留**（实测切变后 Normal=869 / Black=1341，**+54%**）。`_paint_header` 改用切变并以文字左缘为轴，不越出可用区；`_font()` 的 `italic` 参数加注释警示，内置族勿用。
+- **删除旧的箴言 / 谶言库，换用用户提供的各 60 条新库**（`calendar_app/engine.py` 的 `WISDOM_MAXIMS` / `OMENS`）。旧库为 32 条格言 + 21 条征兆且混入了「今日宜静心养气」这类**当日运势口吻**的句子；新库严格按**箴言 = 修身格言、谶言 = 谶纬征兆**两类分开，各 60 条、无重复，仍由日期种子取模分配（同一天固定、逐日轮转，两库等长故组合周期 60 天）。
+  - **排版适配**：新条目字数跨度大（5～13 字），旧代码固定「两列 × 每列 5 字、超过 10 字硬截」，会出现空列与半个空块。新增 `CalendarPage._wisdom_chars()`（剔标点、按上限截断）与 `_paint_wisdom()` —— **列数按实际字数自适应**：≤5 字走**单列居中**（与标题对齐），6～10 字走两列，超过 10 字截断。实测短条（`生于忧患，死于安乐。`）单列居中、长条（`青气上升，赤气下降。`）双列，两块均不溢出 5 行块高。
+- **验证**：`verify_ui.py` 由 **61/61** 扩到 **74/74** ✓ —— 新增 `[8]` 组补上**平台无关的字体 name 表校验**（nameID 3/6 全库不重复、`Noto Serif SC` 三字重 PS 名互异、墨迹梯度、页头不得用 italic）与 `[9]` 组 8 条（箴谶各 60 条、无重复、竖排 1～10 字、标点不进竖排、列数自适应、两块均有字、行数不超 5）。**新增 `tools/dev_checks/font_weight_probe.py`**：**必须在真实平台插件下运行**（显式不设 `QT_QPA_PLATFORM=offscreen`），直接量渲染墨迹断言 `Normal < Bold < Black`，并断言「italic 确实会吞字重」以防有人改回去 —— 这正是旧测试照不到的那条路径，5/5 通过。`ui_agenda_probe.py` **43/43** ✓、`agenda_checks.py` **34/34** ✓、`test_process.py` **14/14** ✓、`geom_probe.py` 通过 ✓。
+- **改动文件**：`tools/build_fonts.py`（`set_names` 补 nameID 3/6）、`tools/fix_font_names.py`（新增）、`fonts/*.ttf`（5 份就地修复）、`ui/theme.py`（`_font` 注释 + `SHEAR` / `_painter_shear`）、`ui/page.py`（`_paint_header` 改切变 + 新增 `_wisdom_chars` / `_paint_wisdom` / `_paint_big_day` 拆分）、`calendar_app/engine.py`（箴谶两库全量替换）、`calendar_app/version.py`、`tools/dev_checks/verify_ui.py`、`tools/dev_checks/font_weight_probe.py`（新增）、`CHANGELOG.md` / `README.md`。
+
+### v1.8.2 (Build 2609280023) — 2026-09-28
+
+- **英文加粗**（用户反馈）。排查后发现「英文看起来不粗」其实是**两个问题叠加**：
+  - **① 字重没吃满**：页头月名原写 `_font(msize, EN_FONT, QFont.Black, italic=True)` —— 参数本身是 Black(900)，但**字号被分支切成两档**（`msize = 26 if len(month) <= 6 else 20`），于是 `MAY / JUNE / MARCH` 用 26px、而 `JANUARY / SEPTEMBER / NOVEMBER / DECEMBER` 等长月名被压到 **20px**，同一个页头上英文月名忽大忽小，长月名细看明显偏小偏细。
+  - **② 字重选择其实有效但不够**：实测内置 `Noto Serif SC` 的 Black 静态实例墨迹比 Regular 厚 **+75%**（`OCTOBER` 深墨像素 664 → 1165），字重本身没问题 —— 所以「不粗」的观感主要来自上面那个 20px 分支。
+  - **修法**：`_paint_header` 改为**基准字号 + 整字等比自适应** —— 新增常量 `CalendarPage.EN_MONTH_PX = 26`，用 `QFontMetricsF` 量出实际宽度，**只有真的放不下才整体缩小**（`setPixelSize`，下限 12px），不再按字符数硬切两档。12 个月名实测全部落在 26px，最宽 `SEPTEMBER = 169.0px`（可用 196px，余量 27px），**大小与粗细终于一致**。
+  - 顺带统一另外两处英文：**英文星期**（中栏 `MONDAY` 等）由 `QFont.Bold` 升为 **`QFont.Black`**，与页头字重同源，不再一处粗一处细；**页脚版权行**的英文品牌名（`Copyright 2026 肆月Aperture`）改为**加粗**、中文说明保持常规 —— 用 `QFontMetricsF` 分别量宽后分两段左对齐绘制（`fm_b` / `w_brand` / `w_tail`），整行仍水平居中，既满足「英文加粗」又保住这行浅灰弱化的观感。
+- **验证**：`verify_ui.py` 由 **54/54** 扩到 **61/61** ✓，新增 `[8]` 组 7 条 —— 「12 个月名英文均不超页头可用宽（基准 26px）」、「长月名不再缩字号（统一 26px）」、「英文月份 Black(900) 墨迹显著多于 Normal(400)（真加粗，实测 +75%）」、「页头英文月份走 Black(900) 且字号自适应」、「英文星期改用 Black(900) 与页头字重一致」、「页脚版权行英文品牌名加粗、中文说明保持常规」、「英文星期在 150px 框内不溢出（`WEDNESDAY` = 73px）」。`ui_agenda_probe.py` **43/43** ✓、`agenda_checks.py` **34/34** ✓、`test_process.py` **14/14** ✓、`pyflakes` 除 `ui_main.py` 有意保留的兼容再导出外**零告警** ✓。
+- **改动文件**：`ui/page.py`（`_paint_header` / `_paint_middle_band` / `_paint_footer` + 新增 `EN_MONTH_PX` 常量与 `QFontMetricsF` 导入）、`calendar_app/version.py`（版本号）、`tools/dev_checks/verify_ui.py`（`[8]` 组）、`CHANGELOG.md` / `README.md`。
+
 ### v1.8.1 (Build 2609280022) — 2026-09-28
 
 - **修复中栏「喜神 / 财神 / 福神 / 冲煞 / X命互禄」第 5 行被整行裁掉（显示不全）**：根因是 v1.8.0 换成内置字体后暴露的**行距差异** —— 旧代码用 `drawText(rect, ..., "\n".join(rows))`，Qt 的换行行距取自字体的 `ascent + descent + leading`；系统宋体（SimSun）约 1.15em，而内置 **Noto Serif SC 为 1.42em（14px → 20px）**，五行需 **100px**，中栏实际可用高仅 **86px**，于是第 5 行「X命互禄 Y命进禄」被整行裁掉。

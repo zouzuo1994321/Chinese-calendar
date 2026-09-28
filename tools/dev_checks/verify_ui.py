@@ -205,13 +205,13 @@ ck("[5] 相位不同 → 数字区亮度不同（确有流光）", lo != hi, "v(
 ck("回归 法定假日 → 红", palette_for({"holiday": "国庆节"})["main"].name() == "#c62828")
 ck("回归 平日 → 绿", palette_for({})["main"].name() == "#1f9c3d")
 ck("回归 版本号 v%s / %s" % (APP_VERSION, BUILD_CODE),
-   APP_VERSION == "1.8.1" and BUILD_CODE == "2609280022", VERSION_TITLE)
+   APP_VERSION == "1.8.6" and BUILD_CODE == "2609280027", VERSION_TITLE)
 ck("回归 生肖水印素材齐备",
    all(os.path.exists(os.path.join(_ZODIAC_DIR, "%s（%s）.png" % (s, t)))
        for s in ("龙", "马") for t in ("红", "绿")))
 ck("回归 页面尺寸 520x848", (page.PAGE_W, page.PAGE_H) == (520, 848))
 from calendar_app import fonts as _fonts
-from ui_main import ZH_FONT as _zhf
+from ui_main import ZH_FONT as _zhf, EN_FONT as _enf
 ck("回归 内置字体已注册", _fonts.SERIF_FAMILY in _fonts.install_fonts(),
    _fonts.report())
 ck("回归 ZH_FONT 首位为内置宋体", _zhf and _zhf[0] == _fonts.SERIF_FAMILY,
@@ -262,7 +262,7 @@ ck("[6] 八卦水印透明度已调至 40%",
    "setOpacity(0.4)" in _src_mid and "IMG_BAGUA" in _src_mid)
 
 from PySide6.QtGui import QFontMetricsF
-from ui.theme import _font as _tf
+from ui.theme import _font as _tf, SHEAR as _SHEAR
 _fm14 = QFontMetricsF(_tf(14, _zhf))
 _worst = ("", 0.0)
 
@@ -374,6 +374,246 @@ ck("[7] 行距与字体解耦：step 由 rect/行数决定",
 _wl = CalendarPage._wrap_px(_fm_demi, "会亲友、出行、安床、祭祀、祈福、安葬", 92)
 ck("[7] 断行优先在「、」处、标点不落行首",
    len(_wl) >= 2 and all(not ln.startswith("、") for ln in _wl), str(_wl))
+
+# ---- [8] 页头英文月份 / 英文星期：加粗取自内置字体 Black(900) 实例 ----
+# 背景：EN_FONT 在 use_builtin_fonts() 后被插成 ['Noto Serif SC', 'Georgia', ...]，
+# 而内置族只打包了 Regular/Bold/Black 三个静态实例，故 weight 参数必须真的命中
+# 三者之一，否则 Qt 退回合成加粗（观感几乎无变化）。用墨迹像素量锁死「真加粗」。
+from PySide6.QtGui import QFont as _QF, QImage as _QImg, QPainter as _QP, QColor as _QC
+from PySide6.QtCore import Qt as _Qt
+MONTHS_EN = ("JANUARY", "FEBRUARY", "MARCH", "APRIL", "MAY", "JUNE", "JULY",
+             "AUGUST", "SEPTEMBER", "OCTOBER", "NOVEMBER", "DECEMBER")
+
+
+def _month_px(month):
+    """按 _paint_header 的同一套模型算出实际字号（基准 EN_MONTH_PX，超宽整字收敛）。"""
+    area_w = 196
+    px = CalendarPage.EN_MONTH_PX
+    adv = QFontMetricsF(_tf(px, _enf, _QF.Black)).horizontalAdvance(month)
+    if adv > area_w:
+        px = max(12, int(px * area_w / adv))
+    return px
+
+
+def _en_ink(text, weight, px, italic=False):
+    """渲染一段英文并统计深墨像素量，用于比较字重是否真的生效。
+
+    ⚠ `italic` 默认 **False**：内置 Noto 系无斜体面，`setItalic(True)` 会触发
+    Qt 合成斜体分支并吞掉字重轴（实测 Bold/Black 与 Regular 墨迹完全相同）。
+    页头月名因此改用 `_painter_shear()` 做几何切变，故此处以非斜体量字重。
+    """
+    img = _QImg(320, 60, _QImg.Format_ARGB32)
+    img.fill(_Qt.white)
+    q = _QP(img)
+    q.setRenderHint(_QP.Antialiasing, False)   # 关抗锯齿，墨迹量可比
+    q.setFont(_tf(px, _enf, weight, italic=italic))
+    q.setPen(_QC("#000000"))
+    q.drawText(0, 42, text)
+    q.end()
+    return sum(1 for y in range(60) for x in range(320)
+               if img.pixelColor(x, y).red() < 160)
+
+
+# ---- [8] 内置字体的字重必须真的可区分（v1.8.2 真实运行环境翻车点）----
+# 背景：build_fonts.py 的 set_names() 漏改 nameID 3/6（PostScript 名 / 唯一标识），
+# instantiateVariableFont(updateFontNames=False) 让 Regular/Bold/Black 三份的 PS 名
+# 完全相同（都是 NotoSerifSC-ExtraLight），Windows 以 PS 名作注册键 → 三字重互相覆盖，
+# 请求 Bold/Black 全部落回同一面，页头英文「只是变大、不会加粗」。
+# **离屏渲染恰好不读这条路径**，所以旧断言全绿却掩盖了线上问题 —— 这里改为直接校验
+# 字体文件的 name 表（平台无关），并用真实平台量墨迹梯度。
+from fontTools.ttLib import TTFont as _TTFont
+_font_dir = os.path.join(_ROOT, "fonts")
+_ttfs = sorted(f for f in os.listdir(_font_dir) if f.lower().endswith(".ttf"))
+_ps_names, _uids = {}, {}
+for _f in _ttfs:
+    _t = _TTFont(os.path.join(_font_dir, _f))
+    _ps_names[_f] = _t["name"].getDebugName(6)
+    _uids[_f] = _t["name"].getDebugName(3)
+    _t.close()
+ck("[8] 内置字体 PostScript 名（nameID 6）互不重复",
+   len(set(_ps_names.values())) == len(_ps_names),
+   "重名=%s" % ({k: v for k, v in _ps_names.items()} if len(set(_ps_names.values())) != len(_ps_names) else "无"))
+ck("[8] 内置字体唯一标识（nameID 3）互不重复",
+   len(set(_uids.values())) == len(_uids),
+   "共 %d 份字体" % len(_ttfs))
+_serif_ps = {f: _ps_names[f] for f in _ttfs if f.startswith("NotoSerifSC")}
+ck("[8] Noto Serif SC 三个字重的 PS 名各不相同",
+   len(set(_serif_ps.values())) == 3, str(_serif_ps))
+
+# 字重梯度：Black 墨迹必须显著厚于 Regular（非斜体路径）
+_norm = _en_ink("OCTOBER", _QF.Normal, 26)
+_demi = _en_ink("OCTOBER", _QF.DemiBold, 26)
+_blk = _en_ink("OCTOBER", _QF.Black, 26)
+ck("[8] 英文 Black(900) 墨迹显著多于 Normal(400)（真加粗）",
+   _blk > _norm * 1.15 and _demi > _norm * 1.10,
+   "Normal=%d DemiBold=%d Black=%d (+%.0f%%)"
+   % (_norm, _demi, _blk, (_blk - _norm) * 100.0 / _norm))
+_hd_src = inspect.getsource(CalendarPage._paint_header)
+# 注意：注释里会出现 "italic=True" 字样（解释为何不能用它），故只校验**代码行**
+_hd_code = "\n".join(ln for ln in _hd_src.splitlines()
+                     if not ln.strip().startswith("#"))
+ck("[8] 内置字体不被 italic 吞掉字重（页头改用 _painter_shear）",
+   "italic=True" not in _hd_code and "_painter_shear" in _hd_code)
+
+_adv = {m: QFontMetricsF(_tf(CalendarPage.EN_MONTH_PX, _enf, _QF.Black)).horizontalAdvance(m)
+        for m in MONTHS_EN}
+_wide = max(_adv, key=lambda m: _adv[m])
+# ⚠ 可用宽度必须减去**切变溢出量**（v1.8.5 教训）：页头月名走 `_painter_shear`，
+# 字形底部向右伸出 |SHEAR| × descent、顶部向左伸出 |SHEAR| × ascent。旧断言只比
+# advance 且硬编码 196px，于是 26px 的 SEPTEMBER（adv=178 看似合规）实际渲染
+# 185.5px、左缘顶到内框线 —— 用户看到的就是「英文出框」。这里按真实几何口径断言。
+_HDR_AREA = QRect(*CalendarPage.EN_MONTH_RECT)
+_fm_hdr = QFontMetricsF(_tf(CalendarPage.EN_MONTH_PX, _enf, _QF.Black))
+_shear_extra = abs(_SHEAR) * (_fm_hdr.ascent() + _fm_hdr.descent())
+_avail_hdr = _HDR_AREA.width() - _shear_extra
+ck("[8] 12 个月名含切变后均不超页头可用宽（基准 %dpx）" % CalendarPage.EN_MONTH_PX,
+   all(_adv[m] + _shear_extra <= _HDR_AREA.width() for m in MONTHS_EN),
+   "最宽 %s = %.1fpx + 切变 %.1fpx = %.1fpx / 可用 %dpx"
+   % (_wide, _adv[_wide], _shear_extra, _adv[_wide] + _shear_extra, _HDR_AREA.width()))
+ck("[8] 页头月名绘制把切变溢出计入宽度判断（防出框）",
+   "SHEAR" in _hd_src and "shear_extra" in _hd_src,
+   "阈值=可用 %.1fpx（已扣切变）" % _avail_hdr)
+# ⚠⚠ 这是 v1.8.6 才补上的**关键断言**：上面两条只管「右边会不会超宽」，
+# 完全没管「左边会不会压线」—— 而用户两次反馈的正是左边出框。
+# 切变以 area.left 为轴、SHEAR=-0.25，字形顶部向左倾 |SHEAR|×ascent，
+# 叠上字形自身左缘倾斜后，整条月名墨迹会比 area.left 再左移约 20px。
+# 故必须**真实渲染并量墨迹左缘**，抽象计算（advance / 估算）在这里完全不可靠。
+from PySide6.QtGui import QImage as _QImg2, QPainter as _QP2, QPen as _QPen2, QColor as _QC2
+from PySide6.QtCore import Qt as _Qt2
+
+
+def _hdr_ink_x(m):
+    """把月名单独渲染到空白画布，返回 (最左墨迹 x, 最右墨迹 x)。
+
+    不叠加整页，避免页边**框线**（外框 x=14 / 内框 x=21）混进墨迹统计 ——
+    早期用整页量测时，12 个月名都「量」到 x=14，那其实是框线而非文字。
+    """
+    im = _QImg2(520, 120, _QImg2.Format_ARGB32)
+    im.fill(_QC2("white"))
+    p = _QP2(im)
+    p.setRenderHint(_QP2.Antialiasing)
+    a = CalendarPage.EN_MONTH_RECT
+    fnt = _tf(CalendarPage.EN_MONTH_PX, _enf, _QF.Black)
+    fmm = QFontMetricsF(fnt)
+    adv, extra = fmm.horizontalAdvance(m), abs(_SHEAR) * (fmm.ascent() + fmm.descent())
+    if adv > a[2] - extra:                       # 复刻 _paint_header 的缩字号分支
+        fnt = _tf(max(11, int(CalendarPage.EN_MONTH_PX * (a[2] - extra) / adv)),
+                  _enf, _QF.Black)
+        fmm = QFontMetricsF(fnt)
+    left_x = a[0]                                # 复刻 _paint_header 的兜底右移分支
+    est = left_x - abs(_SHEAR) * fmm.ascent()
+    if est < CalendarPage.EN_MONTH_MIN_X:
+        left_x += CalendarPage.EN_MONTH_MIN_X - est
+    p.setPen(_QPen2(_QC2("black")))
+    p.save()
+    from ui.theme import _painter_shear as _ps
+    _ps(p, left_x)
+    p.setFont(fnt)
+    p.drawText(QRect(left_x, a[1], a[2], a[3]), _Qt2.AlignVCenter | _Qt2.AlignLeft, m)
+    p.restore()
+    p.end()
+    xmin, xmax = 9999, -1
+    for y in range(im.height()):
+        for x in range(im.width()):
+            if im.pixelColor(x, y).lightness() < 128:
+                xmin, xmax = min(xmin, x), max(xmax, x)
+    return xmin, xmax
+
+
+_hdr_inks = {m: _hdr_ink_x(m) for m in MONTHS_EN}
+_hdr_worst = min(_hdr_inks, key=lambda m: _hdr_inks[m][0])
+_hdr_right = max(_hdr_inks[m][1] for m in MONTHS_EN)
+ck("[8] 12 个月名渲染墨迹左缘均在内框线（x=21）右侧、不压线出框",
+   all(_hdr_inks[m][0] >= CalendarPage.EN_MONTH_MIN_X for m in MONTHS_EN),
+   "最左 %s = x%d（要求 ≥%d，内框线 21）"
+   % (_hdr_worst, _hdr_inks[_hdr_worst][0], CalendarPage.EN_MONTH_MIN_X))
+ck("[8] 页头月名绘制含「左缘兜底右移」分支（防压线）",
+   "EN_MONTH_MIN_X" in _hd_src and "est_left" in _hd_src,
+   "月名最右墨迹 = x%d（年份区起点约 180，无侵占）" % _hdr_right)
+ck("[8] 长月名不再缩字号（12 个月名统一 %dpx）" % CalendarPage.EN_MONTH_PX,
+   all(_month_px(m) == CalendarPage.EN_MONTH_PX for m in MONTHS_EN),
+   "字号集合=%s" % sorted({_month_px(m) for m in MONTHS_EN}))
+_src_hd = inspect.getsource(CalendarPage._paint_header)
+ck("[8] 页头英文月份走 Black(900) 且字号自适应",
+   "_font(self.EN_MONTH_PX, EN_FONT, QFont.Black)" in _src_hd
+   and "setPixelSize" in _src_hd)
+_src_mb = inspect.getsource(CalendarPage._paint_middle_band)
+ck("[8] 英文星期改用 Black(900)，与页头字重一致",
+   "_font(11, EN_FONT, QFont.Black)" in _src_mb
+   and "_font(11, EN_FONT, QFont.Bold)" not in _src_mb)
+_src_ft = inspect.getsource(CalendarPage._paint_footer)
+ck("[8] 页脚版权行英文品牌名加粗、中文说明保持常规",
+   "VER.COPYRIGHT" in _src_ft and "QFont.Bold" in _src_ft
+   and "fm_b" in _src_ft)
+_wk = max(("MONDAY", "WEDNESDAY", "SUNDAY"),
+          key=lambda s: QFontMetricsF(_tf(11, _enf, _QF.Black)).horizontalAdvance(s))
+ck("[8] 英文星期在 150px 框内不溢出",
+   QFontMetricsF(_tf(11, _enf, _QF.Black)).horizontalAdvance(_wk) <= 150,
+   "%s = %.1fpx / 可用 150px" % (
+       _wk, QFontMetricsF(_tf(11, _enf, _QF.Black)).horizontalAdvance(_wk)))
+
+# ---- [9] 箴言 / 谶言：竖排渲染不缺列、不溢出，且全部条目必须 ≤10 字 ----
+from calendar_app.engine import OMENS as _OMENS, WISDOM_MAXIMS as _WIS
+# v1.8.5 删掉 3 条超 10 字的箴言（「忍耐是金，退一步海阔天空。」「岁寒，然后知松柏
+# 之后凋也。」「三军可夺帅也，匹夫不可夺志也。」——11/12/13 字，超出 5 行 × 2 列上限
+# 会被截断）。故两库长度**不再相等**：箴 57 / 谶 60，这里按实际值断言并在失败信息里
+# 报出偏差，避免以后有人「顺手补齐」又把超长条目塞回来。
+ck("[9] 箴言 57 条 / 谶言 60 条", len(_WIS) == 57 and len(_OMENS) == 60,
+   "箴=%d 谶=%d" % (len(_WIS), len(_OMENS)))
+ck("[9] 箴 / 谶 库内无重复条目",
+   len(set(_WIS)) == len(_WIS) and len(set(_OMENS)) == len(_OMENS))
+_wc = [CalendarPage._wisdom_chars(t) for t in _WIS]
+_oc = [CalendarPage._wisdom_chars(t) for t in _OMENS]
+# ⚠ 这条是 v1.8.5 的直接护栏：竖排上限 5 行 × 2 列 = 10 字，超了会被 _wisdom_chars
+# 静默截断、条目显示不全。新增条目必须先过这里。
+_lim = CalendarPage.WIS_MAX_ROWS * CalendarPage.WIS_MAX_COLS
+_over = [t for t, c in list(zip(_WIS, _wc)) + list(zip(_OMENS, _oc)) if len(c) > _lim]
+ck("[9] 全部条目字数 ≤10（超出会被竖排截断，v1.8.5 事故）", not _over,
+   "超限=%s" % _over if _over else "最长=%d 字" % max(len(c) for c in _wc + _oc))
+ck("[9] 全部条目竖排字符数在 1~10 之间",
+   all(1 <= len(c) <= _lim for c in _wc + _oc),
+   "最长=%d 字（%s）" % (max(len(c) for c in _wc + _oc),
+                      max(_WIS + _OMENS, key=lambda t: len(CalendarPage._wisdom_chars(t)))))
+ck("[9] 标点不进竖排（剔除，。；、！？— 与空格）",
+   all(not set(c) & set("，。；、！？— ") for c in _wc + _oc))
+_lens = {len(c) for c in _wc + _oc}
+ck("[9] 短条目走单列居中、长条目走两列（列数按字数自适应）",
+   min(_lens) <= CalendarPage.WIS_MAX_ROWS < max(_lens),
+   "字数分布=%d..%d" % (min(_lens), max(_lens)))
+
+
+def _wis_ink(d):
+    """统计页面上箴 / 谶两个竖排块的深墨像素与占用的行数。"""
+    setup(d)
+    page._sheen_t = 0.0
+    page.repaint()
+    img = page.grab().toImage()
+    out = []
+    for x0 in (26, 444):                       # 箴块 / 谶块
+        rows_hit, total = 0, 0
+        y0 = 134
+        for r in range(CalendarPage.WIS_MAX_ROWS):
+            n = 0
+            for y in range(y0 + 34 + r * 22, y0 + 34 + r * 22 + 22):
+                for x in range(x0, x0 + 50):
+                    c = img.pixelColor(x, y)
+                    if 0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue() < 120:
+                        n += 1
+            if n > 6:
+                rows_hit += 1
+            total += n
+        out.append((rows_hit, total))
+    return out
+
+
+for _d, _tag in ((date(2026, 9, 28), "短条"), (date(2026, 10, 12), "长条")):
+    _r = _wis_ink(_d)
+    _ok = all(tot > 60 for _rows, tot in _r)
+    ck("[9] %s %s：箴 / 谶 两块均有字" % (_tag, _d), _ok,
+       "箴块=%d 谶块=%d" % (_r[0][1], _r[1][1]))
+    ck("[9] %s %s：竖排行数不超过 5 行（未溢出块高）" % (_tag, _d),
+       all(rows <= CalendarPage.WIS_MAX_ROWS for rows, _t in _r),
+       "箴=%d行 谶=%d行" % (_r[0][0], _r[1][0]))
 
 
 def shot(d, t, path):
