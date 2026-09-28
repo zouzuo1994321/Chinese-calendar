@@ -1,0 +1,33 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+
+# ---- 构建产物（PyInstaller / 打包）----
+build/
+dist/
+
+# ---- 历史版本归档（体积大，不进仓库；正式版走 GitHub Releases）----
+history/
+
+# ---- 运行期数据（exe 同目录自动生成）----
+settings.json
+agenda_cache.json
+agenda_edit.json
+
+# ---- 字体构建源（tools/build_fonts.py 可重新下载）----
+tools/_font_src/
+
+# ---- 本地工作区数据 ----
+.workbuddy/
+
+# ---- 设计源文件（PSD 体积大且非运行必需，需发布时单独归档）----
+*.psd
+
+# ---- Windows 系统垃圾 ----
+Thumbs.db
+desktop.ini
+
+# ---- 临时文件 ----
+_sheen_tmp.png
+nul
+*.tmp
