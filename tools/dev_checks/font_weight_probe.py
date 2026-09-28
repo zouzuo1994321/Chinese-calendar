@@ -21,7 +21,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 sys.path.insert(0, _ROOT)
 os.chdir(_ROOT)
 
-from PySide6.QtGui import QColor, QFont, QFontDatabase, QImage, QPainter
+from PySide6.QtGui import QColor, QFont, QImage, QPainter
 from PySide6.QtWidgets import QApplication
 
 app = QApplication(sys.argv)

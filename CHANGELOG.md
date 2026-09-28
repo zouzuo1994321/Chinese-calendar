@@ -4,10 +4,41 @@
 
 ## 版本历史
 
+### v1.8.8 (Build 2609280029) — 2026-09-28
+
+- **目录整理**（用户要求「整理目录下的临时文件和缓存文件」）：
+  - 清理 `build/` 下残留的 `_probe_box_*` / `_stale_*` / `_cleanup_*` 目录（**4.0 GB → 0**，只留 PyInstaller 正式产物）；
+  - 清理 `history/` 旧版 exe，**只保留最近 3 个版本**（v1.8.6 / v1.8.5 / v1.8.4，**6.6 GB → 0.8 GB**）；
+  - 清理 `__pycache__` / `.pyc`、root 下误生的 `1` beacon 日志、`dist/` 下的运行期 `settings.json` / `agenda_cache.json` / `agenda_edit.json`。
+  - 合计释放约 **9.8 GB**。
+- **截图 base64 内嵌进 README**（用户要求「把软件截图直接加入 readme 中避免每次还要外链，并且有图片丢失的可能」）：
+  - 现象：v1.8.7 的 README 用 `docs/screenshots/*.png` 相对路径引用 —— 图片仍是独立文件，存在丢失 / 漏提交风险；用户希望图片**直接成为 README 的一部分**。
+  - 修法：`verify_ui.py` 新增 `_embed_shots_to_readme()`，每次跑完截图渲染就把四张 PNG **base64 内嵌为 `data:image/png;base64,...`**。每次重渲染都会刷新，README 里的图永远是最新版。
+  - README 体积 21 KB → 1.3 MB，GitHub 正常渲染。
+  - `[10]` 组断言同步更新：从「README 含 `docs/screenshots/` 路径」改为「README 含 ≥4 个 `data:image/png;base64,` 且四张图的 alt 标记齐备」。
+- **全量回归**：`verify_ui.py` **82/82** ✓ · `ui_agenda_probe.py` **43/43** ✓ · `agenda_checks.py` **34/34** ✓ · `test_process.py` **18/18** ✓ · `font_weight_probe.py` 真实平台 **5/5** ✓ · `geom_probe.py` 通过 ✓ · pyflakes 零输出 ✓。
+- **改动文件**：`calendar_app/version.py`、`README.md`、`tools/dev_checks/verify_ui.py`、`CHANGELOG.md`。
+
+### v1.8.7 (Build 2609280028) — 2026-09-28
+
+- **修复 README 中的软件截图**（用户反馈）。查下来是**两个独立问题**叠加：
+  - **① README 的截图表格里根本没有图片**。表格两行四格全是占位文字（`` `绿日` ``、`红日`、`窗口`、`高光`），从未引用 `docs/screenshots/` 下的实际文件 —— 也就是 README 上一直只显示文字、看不到图。
+    - 修法：改为标准 Markdown 图片引用 `![绿日](docs/screenshots/screenshot-green.png)` 等四张。
+  - **② 「红日」截图实际是绿色的**。`verify_ui.py` 的 `shot()` 用 `page.update() + app.processEvents()` 渲染，而**主窗口有一个每 30s 的跨日轮询定时器** —— `processEvents()` 会把它驱动起来，把 `page.info` **重置回「今天」（2026-09-28，绿色主题）**。结果 `shot(RED, ...)` 存下来的是一张绿日图，README 里红绿对比形同虚设。这正是 SKILL.md「离屏像素断言的正确姿势」里记录的老坑，只是当时没覆盖到截图路径。
+    - 修法：`shot()` 改走 `page.repaint()` 同步重绘（不驱动事件循环），并加上 **`assert page.info["date"] == d`** 自检 —— 万一将来有人改回去，截图当场就报错而不是悄悄存错。`bright()`（高光相位亮度取样）与 `screenshot-window.png` / `screenshot-sheen.png` 的生成路径有同样的问题，一并修正。
+  - **实测**：`screenshot-red.png` 现在正确显示 **2026-09-27 中秋节法定假日**（红色主题 `#c62828`，页头 `SEPTEMBER` 亦确认不出框），`screenshot-green.png` 为 2026-10-10 平日（绿色 `#1f9c3d`）。
+- **新增 `[10]` 组 4 条断言**（`verify_ui.py` **78/78 → 82/82**）：
+  - 截图 / `bright` 的**渲染路径不含 `processEvents`**（防红日再被重置成绿日）；
+  - 两者都带 **`page.info` 日期自检**；
+  - **四张截图文件齐备**；
+  - **README 已用真实图片引用四张截图**（非占位文字）—— 直接钉死问题 ①。
+  - 实现备注：源码扫描要**剔掉 docstring**，因为 `shot()` / `bright()` 的 docstring 里有意写着「不能用 processEvents」作为警示，按普通文本扫描会误报。改用 AST 取非 docstring 语句的行号来判定。
+- **验证**：`verify_ui.py` **82/82** ✓ · `test_process.py` **18/18** ✓ · `ui_agenda_probe.py` **43/43** ✓ · `agenda_checks.py` **34/34** ✓ · pyflakes 零输出 ✓。
+- **改动文件**：`README.md`（截图表格改真实图片引用）、`tools/dev_checks/verify_ui.py`（`shot`/`bright` 去掉 `processEvents` + 加日期自检 + 新增 `[10]` 组）、`calendar_app/version.py`、`CHANGELOG.md`。
+
 ### v1.8.6 (Build 2609280027) — 2026-09-28
 
 - **修复页头英文月份「仍然出框」**（用户二次反馈，明确指出「应该是往右边移动」）。**v1.8.5 没修对方向**——当时只盯了「右边会不会超宽」，而真正的现象是**左边压线**：
-
   - **真正根因**：`_paint_header` 用 `_painter_shear()` 做切变（`SHEAR = -0.25`），且**以 `area.left()` 为切变轴**。切变让字形顶部向左倾 `|SHEAR| × ascent`，叠加字形自身左缘的倾斜后，**整条月名的墨迹左缘会比 `area.left` 再左移约 20px**。原先 `EN_MONTH_RECT` 的 `left = 36`，于是 `SEPTEMBER` 的墨迹左缘落到 **x=16**，而页边**内框线在 x=21** —— 文字直接压到框线外侧，就是用户反复看到并两次截图标红的「出框」。
   - **为什么 v1.8.5 没解决**：那一版只改了「宽度判断要扣掉切变溢出」和「字号 26 → 21」，**完全没有检查左边界**；断言也只写了 `adv + shear_extra <= width`，同样是只管右边。方向判断错了，改再多也不会好。
   - **修法（三处）**：
@@ -25,7 +56,6 @@
 ### v1.8.5 (Build 2609280026) — 2026-09-28
 
 - **修复页头英文月份「加粗后出框」**（用户反馈：v1.8.4 的加粗已生效，但 `SEPTEMBER` / `OCTOBER` 撑出了可用区）。这是 v1.8.4 那轮改动的**副作用**——当时为了消除"加粗不明显"把基准字号定到 26px，并只按字形的**几何 advance** 判断是否放得下：
-
   - **根因**：页头月名走 `_painter_shear()` 做仿射切变（`SHEAR = -0.25`）模拟斜体。切变以文字左缘为轴，字形**底部向右伸出 `|SHEAR| × descent`、顶部向左伸出 `|SHEAR| × ascent`**。而旧代码只比较 `horizontalAdvance(month) <= area.width()`：26px 的 `SEPTEMBER` advance = 178px、可用 196px，**判断为"放得下"**，但加上切变溢出 7.5px 后实际渲染 185.5px，左缘已顶到页边内框线——用户看到的就是出框。
   - **修法（两处）**：① `ui/page.py` 把**切变溢出量计入宽度判断**（`avail = area.width() - abs(SHEAR) × (ascent+descent)`），超宽才等比缩字号；② 基准字号 **26 → 21px**（`EN_MONTH_PX`），并把页头月名可用区提为常量 `EN_MONTH_RECT = (36, 56, 190, 40)` 便于断言与调参。
   - **实测**：21px 下最宽 `SEPTEMBER` = 128px + 切变 7.5px = **135.5px / 可用 182.5px**（余量 47px），12 个月名全部从容放下，加粗与斜体观感不变（`font_weight_probe.py` 仍 **5/5**：切变后 Normal=869 / Black=1341，**+54%**）。
@@ -44,7 +74,6 @@
 ### v1.8.4 (Build 2609280025) — 2026-09-28
 
 - **修复「双击 exe 后长时间没反应」的启动卡顿**。一次冻结冒烟里，从 `enter-main` 到窗口显示耗时异常，逐段计时后定位到 **`kill_stale_instances()` 会无条件吃满超时预算**：
-
   - **现象**：`main()` 第一行的路标 `enter-main` 与后续路标之间被拖住 **17s+**（另一次实测整体 30s+），用户观感就是「双击了没动静」，容易误判为程序没启动而反复双击。源码模式（非冻结）启动仅 **1.4s**，说明是冻结 exe 特有路径。
   - **根因**：旧实现是 `if killed:` 就进入等待循环 —— **只要杀过任何一个残留进程，无论对方是否真的还活着**，都会一路轮询到 `timeout_ms`（默认 3s，叠加多次进程表全量枚举后实际远超）。而残留清理的唯一作用是「让旧实例腾开文件句柄」，**对本实例的界面没有任何依赖**，放在 `QApplication` 之前同步执行纯属自找阻塞。
   - **修法（两处）**：
@@ -61,7 +90,6 @@
 ### v1.8.3 (Build 2609280024) — 2026-09-28
 
 - **修复「英文加粗在真实运行环境中失效」**（用户反馈：截图里看着是粗的，实际运行只是变大没变粗）。这是一处**离屏测试照不到的盲区**，根因有两层，都在字体注册层面：
-
   - **① 内置字体的 PostScript 名重复（主因）**。`tools/build_fonts.py` 的 `set_names()` 只改写了 nameID 1/2/4/16/17，**漏了 nameID 6（PostScript 名）与 nameID 3（唯一标识）**。而 `instancer.instantiateVariableFont(..., updateFontNames=False)` 会把可变字体的原始 PS 名原样带过来，于是：
     ```
     NotoSerifSC-Regular.ttf / -Bold.ttf / -Black.ttf  →  nameID 6 全是 NotoSerifSC-ExtraLight
@@ -75,6 +103,7 @@
   - **排版适配**：新条目字数跨度大（5～13 字），旧代码固定「两列 × 每列 5 字、超过 10 字硬截」，会出现空列与半个空块。新增 `CalendarPage._wisdom_chars()`（剔标点、按上限截断）与 `_paint_wisdom()` —— **列数按实际字数自适应**：≤5 字走**单列居中**（与标题对齐），6～10 字走两列，超过 10 字截断。实测短条（`生于忧患，死于安乐。`）单列居中、长条（`青气上升，赤气下降。`）双列，两块均不溢出 5 行块高。
 - **验证**：`verify_ui.py` 由 **61/61** 扩到 **74/74** ✓ —— 新增 `[8]` 组补上**平台无关的字体 name 表校验**（nameID 3/6 全库不重复、`Noto Serif SC` 三字重 PS 名互异、墨迹梯度、页头不得用 italic）与 `[9]` 组 8 条（箴谶各 60 条、无重复、竖排 1～10 字、标点不进竖排、列数自适应、两块均有字、行数不超 5）。**新增 `tools/dev_checks/font_weight_probe.py`**：**必须在真实平台插件下运行**（显式不设 `QT_QPA_PLATFORM=offscreen`），直接量渲染墨迹断言 `Normal < Bold < Black`，并断言「italic 确实会吞字重」以防有人改回去 —— 这正是旧测试照不到的那条路径，5/5 通过。`ui_agenda_probe.py` **43/43** ✓、`agenda_checks.py` **34/34** ✓、`test_process.py` **14/14** ✓、`geom_probe.py` 通过 ✓。
 - **改动文件**：`tools/build_fonts.py`（`set_names` 补 nameID 3/6）、`tools/fix_font_names.py`（新增）、`fonts/*.ttf`（5 份就地修复）、`ui/theme.py`（`_font` 注释 + `SHEAR` / `_painter_shear`）、`ui/page.py`（`_paint_header` 改切变 + 新增 `_wisdom_chars` / `_paint_wisdom` / `_paint_big_day` 拆分）、`calendar_app/engine.py`（箴谶两库全量替换）、`calendar_app/version.py`、`tools/dev_checks/verify_ui.py`、`tools/dev_checks/font_weight_probe.py`（新增）、`CHANGELOG.md` / `README.md`。
+
 
 ### v1.8.2 (Build 2609280023) — 2026-09-28
 
@@ -142,6 +171,7 @@
 - **打包调整**：spec `hiddenimports` 加入 `pypdf`、`openpyxl`，并 `collect_submodules('openpyxl')`，保证表格导入/导出在单文件 exe 中可用。
 - **验证**：新增三套可复跑回归 —— 行事历数据层 `agenda_checks.py` **34/34** ✓（严格/宽松/表格解析、xlsx+pdf 模板往返、区间筛选与跨年推算、xlsx/csv/txt 导出、覆写层）；行事历 UI 探针 `ui_agenda_probe.py` **23/23** ✓（编辑/保存落盘与取消回退、按钮位置、导入崩溃回归、导出四种分支）。**冻结环境端到端探针 `frozen_agenda_probe.py` 12/12** ✓（先打成独立 exe 再跑，实测 `openpyxl 3.1.5` / `pypdf 6.17.0` / `reportlab 5.0.1` 均已入包，模板→导入→区间导出→覆写全链路通）；原有 `verify_ui.py` **33/33** ✓、`test_process.py` **14/14** ✓、`geom_probe.py` 几何判定**通过**（龙凤左右留白 74/75）。exe 体积 **261.0 MB**，旧版归档 `history/农历日历_v1.6.0_2609270017.exe`。
 
+
 ### v1.6.0 (Build 2609270017) — 2026-09-27
 
 - **龙凤缩小 + 随红绿换图**：大日期两侧左龙右凤水印高度由 230px 缩至 168px，改从 `龙凤/` 目录按当日主题取图 —— 红日取 `龙（红）.png` / `凤（红）.png`，绿日取 `龙（绿）.png` / `凤（绿）.png`（`_tone_of` 判色 + `_lf_asset` 组路径），40% 透明度、绘于文字之下、左右对称。
@@ -169,7 +199,6 @@
 - **左龙右凤水印**：大日期两侧叠加「龙.png」（左）/「凤.png」（右）剪纸水印，40% 透明度、绘于文字之下、左右对称；白底 JPG 已做白转透明处理为 RGBA 素材并随 exe 打包。
 - **关于本软件 · 联系作者**：新增联系作者区块，含 GitHub（github.com/zouzuo1994321）、哔哩哔哩（space.bilibili.com/13715）、微博（weibo.com/u/5189652182）、邮箱（<921103025@qq.com>）四项，图标着色为墨色、链接可点击跳转。
 - 离屏冒烟 `_smoke_v150.py` 30/30 ✓；真机预览 `preview_v150_main.png` / `preview_v150_about.png`；旧版 exe 归档：`history/农历日历_v1.4.0_2609270015.exe`。
-
 
 ### v1.4.0 (Build 2609270015) — 2026-09-27
 
@@ -284,6 +313,7 @@
 - 旧版 exe 已归档至 `history/肆月日历_v1.1.1_2609270001.exe`。
 
 ### v1.1.1 (Build 2609270001) — 2026-09-27
+
 
 - 首个功能版本。
 - 桌面无边框撕页老黄历界面（绿单色印刷、纸色底、竖排对联、叠纸效果、翻页/撕页动效）。

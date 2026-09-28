@@ -2,6 +2,7 @@
 """源码态综合复核：覆盖本次需求 + 性能 + 回归（版本号随 version.py 迭代）。"""
 import os
 import sys
+import textwrap
 import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -186,11 +187,17 @@ ck("[5] 相位循环回绕 [0,1)", 0.0 <= page._sheen_t < 1.0, "_sheen_t=%.4f" %
 
 
 def bright(d, t):
+    """在指定日期 + 高光相位下取样数字区亮度。
+
+    ⚠ 走 `repaint()` 同步重绘，**不能** `update()+processEvents()` ——
+    后者会驱动跨日定时器把 `page.info` 重置回「今天」（绿色），
+    于是 `bright(RED, ...)` 实际取到的是绿色页面，断言失去意义。
+    """
     setup(d)
     page._sheen_t = t
-    page.update()
-    app.processEvents()
+    page.repaint()
     img = page.grab().toImage()
+    assert page.info["date"] == d, "bright(): page.info 被重置为 %s" % page.info["date"]
     v = 0
     for yy in range(110, 296, 3):
         for xx in range(66, 458, 3):
@@ -205,7 +212,7 @@ ck("[5] 相位不同 → 数字区亮度不同（确有流光）", lo != hi, "v(
 ck("回归 法定假日 → 红", palette_for({"holiday": "国庆节"})["main"].name() == "#c62828")
 ck("回归 平日 → 绿", palette_for({})["main"].name() == "#1f9c3d")
 ck("回归 版本号 v%s / %s" % (APP_VERSION, BUILD_CODE),
-   APP_VERSION == "1.8.6" and BUILD_CODE == "2609280027", VERSION_TITLE)
+   APP_VERSION == "1.8.8" and BUILD_CODE == "2609280029", VERSION_TITLE)
 ck("回归 生肖水印素材齐备",
    all(os.path.exists(os.path.join(_ZODIAC_DIR, "%s（%s）.png" % (s, t)))
        for s in ("龙", "马") for t in ("红", "绿")))
@@ -617,21 +624,33 @@ for _d, _tag in ((date(2026, 9, 28), "短条"), (date(2026, 10, 12), "长条")):
 
 
 def shot(d, t, path):
+    """渲染指定日期 + 高光相位，存为 README 截图。
+
+    ⚠⚠ v1.8.7 修复：此处**绝不能调 `app.processEvents()`**。
+    主窗口有一个每 30s 的跨日轮询定时器，`processEvents()` 会把它驱动起来，
+    把 `page.info` 重置回「今天」（2026-09-28，绿色主题）—— 于是**红日截图也变成
+    绿日**，README 里两张图配色全错（用户 2026-09-28 反馈「修复 README 中的截图」）。
+    正确姿势（见 SKILL.md「离屏像素断言的正确姿势」）：
+        setup(d) → page._sheen_t = t → page.repaint() → page.grab()
+    只用 `repaint()` 同步重绘，不碰事件循环。
+    """
     setup(d)
     page._sheen_t = t
-    page.update()
-    app.processEvents()
-    page.grab().save(path)
+    page.repaint()                      # 同步重绘；不用 update()+processEvents()
+    img = page.grab()
+    img.save(path)
+    # 自检：确认存下来的确实是目标日期的画面，而不是被跨日定时器重置回「今天」
+    assert page.info["date"] == d, \
+        "截图 %s 的 page.info 被重置为 %s（期望 %s）" % (path, page.info["date"], d)
     return Image.open(path).size
 
 
 print("预览:", shot(RED, 0.34, "docs/screenshots/screenshot-red.png"),
       shot(GREEN, 0.34, "docs/screenshots/screenshot-green.png"))
-page.info = get_day_info(RED)
-page.P = palette_for(page.info)
+# ⚠ 同样不能走 processEvents（会把 page.info 重置回今天，窗口截图就变绿日了）
+setup(RED)
 page._sheen_t = 0.30
-page.update()
-app.processEvents()
+page.repaint()
 win.grab().save("docs/screenshots/screenshot-window.png")
 print("预览: docs/screenshots/screenshot-window.png", Image.open("docs/screenshots/screenshot-window.png").size)
 
@@ -642,8 +661,7 @@ _tmp = "_sheen_tmp.png"
 try:
     for t in (0.00, 0.14, 0.28, 0.42, 0.56, 0.70, 0.84, 0.97):
         page._sheen_t = t
-        page.update()
-        app.processEvents()
+        page.repaint()                  # 同步重绘，不驱动事件循环
         page.grab().copy(CROP).save(_tmp)
         tiles.append(Image.open(_tmp).convert("RGB"))
     W, H = tiles[0].size
@@ -655,6 +673,88 @@ try:
 finally:
     if os.path.exists(_tmp):       # 自清理：不留过程文件
         os.remove(_tmp)
+
+# ---- 把四张截图以 base64 内嵌进 README（避免外链与图片丢失，v1.8.8）----
+# 用户明确要求：「把软件截图直接加入 readme 中避免每次还要外链，并且有图片丢失的可能」。
+# 每次跑 verify_ui 都重渲染截图 → 重嵌 base64，保证 README 里的图永远是最新的。
+def _embed_shots_to_readme():
+    import re, base64
+    pairs = [("绿日", "screenshot-green.png"), ("红日", "screenshot-red.png"),
+             ("窗口", "screenshot-window.png"), ("高光", "screenshot-sheen.png")]
+    src = open("README.md", encoding="utf-8").read()
+    for alt, fn in pairs:
+        path = os.path.join("docs", "screenshots", fn)
+        if not os.path.exists(path):
+            print("⚠ 截图缺失，跳过内嵌:", fn)
+            continue
+        b64 = base64.b64encode(open(path, "rb").read()).decode("ascii")
+        data_uri = "data:image/png;base64," + b64
+        # 匹配 ![alt](任意URL) —— base64 不会含 ')'，故 [^)]* 安全
+        pattern = r'!\[' + re.escape(alt) + r'\]\([^)]*\)'
+        src, n = re.subn(pattern, '![' + alt + '](' + data_uri + ')', src)
+        if n == 0:
+            print("⚠ README 未找到 ![alt] 标记:", alt)
+    open("README.md", "w", encoding="utf-8").write(src)
+
+_embed_shots_to_readme()
+
+failed = [n for n, c, _ in R if not c]
+
+# ---- [10] README 截图交付物：渲染路径不得用 processEvents，且文件确实存在 ----
+# ⚠ v1.8.7 用户反馈「修复 README 中的软件截图」。两个问题：
+#   ① README 的截图表格里**只有占位文字、没有图片引用**；
+#   ② `shot()` 用 `update()+processEvents()` 渲染 → 跨日定时器把 page.info 重置回
+#      「今天」（绿色），于是**「红日」截图存下来是绿色的**，README 两张图配色全错。
+# 这里在截图生成之后（函数已定义）断言路径干净 + 四张图齐备。
+_shot_src = inspect.getsource(shot)
+_bright_src = inspect.getsource(bright)
+
+
+def _code_only(src):
+    """只保留可执行代码行。
+
+    需要同时剔掉两类「非代码」文本，否则会误报：
+      · `#` 注释行；
+      · **docstring 里的说明** —— `shot()` / `bright()` 的 docstring 有意写着
+        「不能用 processEvents」作为警示，那是文档而不是调用。
+    做法：解析 AST，只保留非 docstring 的语句所在行号。
+    """
+    import ast
+    tree = ast.parse(textwrap.dedent(src))
+    body = tree.body[0].body
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+        body = body[1:]                      # 丢掉函数自己的 docstring
+    nocomment = "\n".join(ln.split("#", 1)[0] for ln in src.splitlines())
+    lines = textwrap.dedent(nocomment).splitlines()
+    keep = set()
+    for node in body:
+        for ln in range(node.lineno - 1,
+                        getattr(node, "end_lineno", node.lineno)):
+            keep.add(ln)
+    return "\n".join(lines[i] for i in sorted(keep) if i < len(lines))
+
+
+ck("[10] 截图/bright 渲染路径不含 processEvents（防红日存成绿日）",
+   "processEvents" not in _code_only(_shot_src)
+   and "processEvents" not in _code_only(_bright_src),
+   "shot/bright 均走 repaint() 同步重绘")
+ck("[10] 截图函数带 page.info 日期自检（防被定时器重置）",
+   "assert page.info" in _shot_src and "assert page.info" in _bright_src)
+_SHOTS = ("screenshot-red.png", "screenshot-green.png",
+          "screenshot-window.png", "screenshot-sheen.png")
+_missing = [s for s in _SHOTS
+            if not os.path.exists(os.path.join("docs", "screenshots", s))]
+ck("[10] README 四张截图文件齐备", not _missing, "缺失=%s" % _missing if _missing else "4/4")
+# README 必须把四张图以 base64 data URI 内嵌（v1.8.8：不再用 docs/screenshots/ 外链，
+# 避免图片丢失）。曾经是空占位文字，v1.8.7 改为相对路径，v1.8.8 改为 base64 内嵌。
+_readme = open("README.md", encoding="utf-8").read()
+_b64_count = _readme.count("data:image/png;base64,")
+# 用 alt 文本确认四张图都在（base64 内容每次重渲染会变，不能直接当 key）
+_have_alts = all(("![" + a + "](data:image/png;base64,") in _readme
+                 for a in ("绿日", "红日", "窗口", "高光"))
+ck("[10] README 四张截图已 base64 内嵌（非外链 / 非占位文字）",
+   _b64_count >= 4 and _have_alts,
+   "data URI=%d  alt齐=%s" % (_b64_count, _have_alts))
 
 failed = [n for n, c, _ in R if not c]
 print("\n==== UI 复核 (v%s) ==== total=%d passed=%d failed=%d"
