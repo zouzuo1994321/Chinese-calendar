@@ -12,7 +12,7 @@ os.chdir(_ROOT)
 
 from datetime import date
 from PIL import Image
-from PySide6.QtCore import QRect
+from PySide6.QtCore import QRect, Qt
 from PySide6.QtWidgets import QApplication
 
 import ui_main
@@ -109,7 +109,8 @@ def corner_dots(d):
     img = page.grab().toImage()
     main = palette_for(page.info)["main"]
     pts = [(14, 14), (page.PAGE_W - 14, 14),
-           (14, page.PAGE_H - 46), (page.PAGE_W - 14, page.PAGE_H - 46)]
+           (14, CalendarPage.FRAME_OUT_BOTTOM),
+           (page.PAGE_W - 14, CalendarPage.FRAME_OUT_BOTTOM)]
     hit = 0
     for x, y in pts:
         c = img.pixelColor(x, y)
@@ -139,7 +140,7 @@ ck("[4] _pix_cached 命中同一对象", _pix_cached(IMG_LOGO) is _pix_cached(IM
 ck("[4] _pix_scaled 命中同一对象",
    _pix_scaled(IMG_LOGO, 40, 40) is _pix_scaled(IMG_LOGO, 40, 40))
 ck("[4] _paper_pixmap 命中同一对象",
-   _paper_pixmap(520, 848) is _paper_pixmap(520, 848))
+   _paper_pixmap(520, 841) is _paper_pixmap(520, 841))
 
 setup(RED)
 page._sheen_t = 0.0
@@ -212,11 +213,16 @@ ck("[5] 相位不同 → 数字区亮度不同（确有流光）", lo != hi, "v(
 ck("回归 法定假日 → 红", palette_for({"holiday": "国庆节"})["main"].name() == "#c62828")
 ck("回归 平日 → 绿", palette_for({})["main"].name() == "#1f9c3d")
 ck("回归 版本号 v%s / %s" % (APP_VERSION, BUILD_CODE),
-   APP_VERSION == "1.8.8" and BUILD_CODE == "2609280029", VERSION_TITLE)
+   APP_VERSION == "1.9.11" and BUILD_CODE == "2609300012", VERSION_TITLE)
 ck("回归 生肖水印素材齐备",
    all(os.path.exists(os.path.join(_ZODIAC_DIR, "%s（%s）.png" % (s, t)))
        for s in ("龙", "马") for t in ("红", "绿")))
-ck("回归 页面尺寸 520x848", (page.PAGE_W, page.PAGE_H) == (520, 848))
+ck("回归 页面尺寸 520x841（v1.9.10 底部按钮距外框 5px）",
+   (page.PAGE_W, page.PAGE_H) == (520, 841))
+ck("回归 软件 logo 已更新为新版（logo.png 1024² / logo.ico 多尺寸）",
+   os.path.getsize(IMG_LOGO) > 500000
+   and os.path.getsize(os.path.join(os.path.dirname(IMG_LOGO), "logo.ico")) > 100000,
+   "logo.png=%d B" % os.path.getsize(IMG_LOGO))
 from calendar_app import fonts as _fonts
 from ui_main import ZH_FONT as _zhf, EN_FONT as _enf
 ck("回归 内置字体已注册", _fonts.SERIF_FAMILY in _fonts.install_fonts(),
@@ -224,18 +230,21 @@ ck("回归 内置字体已注册", _fonts.SERIF_FAMILY in _fonts.install_fonts()
 ck("回归 ZH_FONT 首位为内置宋体", _zhf and _zhf[0] == _fonts.SERIF_FAMILY,
    str(_zhf[:2]))
 
-# ---- [6] 中栏「喜神/财神/福神/冲煞/X命互禄」：五行必须全部显示完整 ----
-# 背景：内置 Noto Serif SC 默认行距 1.42em（14px → 20px），五行需 100px，
-# 而中栏可用高仅 86px → 旧写法用 "\n".join 会整行裁掉第 5 行（v1.8.0 后暴露）。
-MID_X, MID_Y, MID_W, MID_H = 184, 387, 152, 90     # = QRect(184, y+3, 152, h-6)
-MID_STEP = MID_H / 5.0
+# ---- [6] 宜/忌框下方「神位信息行」：喜神/财神/福神/冲煞/禄 必须全部显示完整 ----
+# v1.9.4：随宜/忌满宽化（224 双栏），五行信息从「中缝 160px」挪到宜/忌框下方
+# 独立一行，按满宽 5 槽等分（每槽 92px），过长项 elide 兜底，绝不溢出。
+MID_Y = 462
+MID_X0 = 30
+MID_TOT = 460
+MID_SLOTS = 5
+MID_STEP = MID_TOT / MID_SLOTS
 
 
-def _mid_ink(img, y0, y1):
-    """统计中栏文字区内的「深墨」像素（阈值 120 可滤掉 40% 的八卦水印）。"""
+def _mid_ink_row(img, x0, x1, y0, y1):
+    """统计神位信息行某槽内的「深墨」像素（阈值 120 过滤浅色底）。"""
     n = 0
     for yy in range(int(y0), int(y1)):
-        for xx in range(MID_X, MID_X + MID_W):
+        for xx in range(int(x0), int(x1)):
             c = img.pixelColor(xx, yy)
             if 0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue() < 120:
                 n += 1
@@ -249,52 +258,58 @@ def mid_rows(d):
     #                     定时器会在处理事件时把 page.info 重置回「今天」，
     #                     导致量到的是错日期的画面（v1.8.1 排查时踩到）
     img = page.grab().toImage()
-    per = [_mid_ink(img, MID_Y + i * MID_STEP, MID_Y + (i + 1) * MID_STEP)
-           for i in range(5)]
-    below = _mid_ink(img, MID_Y + MID_H, MID_Y + MID_H + 4)   # 方框之外
-    return per, below
+    return [_mid_ink_row(img, MID_X0 + i * MID_STEP, MID_X0 + (i + 1) * MID_STEP,
+                         MID_Y, MID_Y + 16)
+            for i in range(MID_SLOTS)]
 
 
 for d, tag in ((RED, "红日"), (GREEN, "绿日")):
-    per, below = mid_rows(d)
-    ck("[6] 中栏五行全部有字 · %s" % tag, all(v > 40 for v in per),
-       "各槽像素=%s" % per)
-    ck("[6] 中栏文字未溢出到方框之外 · %s" % tag, below == 0,
-       "越界像素=%d" % below)
+    per = mid_rows(d)
+    ck("[6] 神位信息行（喜神/财神/福神/冲煞/禄）全部有字 · %s" % tag,
+       all(v > 8 for v in per), "各槽像素=%s" % per)
 
 _src_mid = inspect.getsource(CalendarPage._paint_yiji)
-ck("[6] 中栏改逐行等分绘制（不再依赖字体行距）",
-   "_draw_rows(p, rows" in _src_mid and '"\\n".join(rows)' not in _src_mid)
-ck("[6] 八卦水印透明度已调至 40%",
-   "setOpacity(0.4)" in _src_mid and "IMG_BAGUA" in _src_mid)
+ck("[6] 宜/忌 回退 v1.9.3 窄 150 双栏（中缝放神位，v1.9.5）",
+   "drawRect(30, y, 150, h)" in _src_mid
+   and "drawRect(340, y, 150, h)" in _src_mid
+   and "_draw_rows" not in _src_mid)
+ck("[6] 神位信息竖排中缝 5 行（喜神/财神/福神/冲煞/禄，v1.9.3 回退）",
+   "seam_x, seam_w = 186, 150" in _src_mid
+   and '"喜神 %s" % info["pos_xi"]' in _src_mid)
 
 from PySide6.QtGui import QFontMetricsF
 from ui.theme import _font as _tf, SHEAR as _SHEAR
-_fm14 = QFontMetricsF(_tf(14, _zhf))
+# v1.9.7：中缝神位文字加大加粗（11px→13px Bold），此处按新字号复刻 elide 逻辑
+_fm13 = QFontMetricsF(_tf(13, _zhf, __import__("PySide6.QtGui",
+                                              fromlist=["QFont"]).QFont.Bold))
 _worst = ("", 0.0)
 
 
-def _scan_widest():
+def _scan_lu():
     from datetime import timedelta
     global _worst
+    slot = 150                                 # 中缝宽（与 page.py 一致）
     for i in range(1096):                      # 2026-01-01 起三年逐日
         info = get_day_info(date(2026, 1, 1) + timedelta(days=i))
         for r in ("喜神 %s" % info["pos_xi"], "财神 %s" % info["pos_cai"],
                   "福神 %s" % info["pos_fu"], "冲煞 %s" % info["chong"],
-                  "%s" % info["lu"]):
-            w = _fm14.horizontalAdvance(r)
+                  info["lu"]):
+            # 复刻 page.py 渲染逻辑：elide 到 seam-6 后再量宽，
+            # 验证「超长项由 elide 兜底、渲染后绝不溢出中缝」（v1.9.3 回退）
+            el = _fm13.elidedText(r, Qt.ElideRight, slot - 6)
+            w = _fm13.horizontalAdvance(el)
             if w > _worst[1]:
-                _worst = (r, w)
+                _worst = (el, w)
     return _worst
 
 
-_scan_widest()
-ck("[6] 三年内最宽一行仍可容于中栏", _worst[1] <= MID_W,
-   "%r = %.1fpx / 可用 %dpx" % (_worst[0], _worst[1], MID_W))
+_scan_lu()
+ck("[6] 神位信息最宽项（13px Bold）elide 后必可容于中缝 150px（超长由 elide 兜底，无溢出）",
+   _worst[1] <= 150, "elide后 %r = %.1fpx / 可用 150px" % (_worst[0], _worst[1]))
 
 # ---- [7] 宜 / 忌 文本块：内置字体行距 20px，三行需 60px，旧文字区仅 48px ----
 # 2026-01-06 宜「会亲友」第三行被裁（v1.8.1 修复）。此处锁定「最多三行 + 三行全可见」。
-YIJI_X, YIJI_Y, YIJI_W, YIJI_H, YIJI_MAX = 38, 424, 140, 54, 3
+YIJI_X, YIJI_Y, YIJI_W, YIJI_H, YIJI_MAX = 35, 422, 140, 54, 3
 _fm_demi = QFontMetricsF(_tf(14, _zhf, __import__("PySide6.QtGui",
                                                  fromlist=["QFont"]).QFont.DemiBold))
 
@@ -334,7 +349,7 @@ def _yiji_ink(d):
     page.repaint()
     img = page.grab().toImage()
     out = []
-    for x0, key in ((YIJI_X, "yi"), (YIJI_X + 310, "ji")):
+    for x0, key in ((35, "yi"), (345, "ji")):
         text = "、".join(page.info[key][:6]) or "—"
         slots = _yiji_slots(text)
         if os.environ.get("SYY_DBG"):        # SYY_DBG=1 时打印断行与槽位明细
@@ -374,7 +389,7 @@ for _d, _tag in ((date(2026, 1, 6), "三行日"), (RED, "两行日"), (GREEN, "�
 
 _src_yi = inspect.getsource(CalendarPage._paint_yiji)
 ck("[7] 宜/忌 改手工断行绘制（不再用 TextWordWrap）",
-   "_draw_para(p," in _src_yi and "TextWordWrap" not in _src_yi)
+   "_draw_para(" in _src_yi and "TextWordWrap" not in _src_yi)
 ck("[7] 行距与字体解耦：step 由 rect/行数决定",
    "rect.height() / float(len(lines))" in inspect.getsource(
        CalendarPage._draw_para))
@@ -755,6 +770,316 @@ _have_alts = all(("![" + a + "](data:image/png;base64,") in _readme
 ck("[10] README 四张截图已 base64 内嵌（非外链 / 非占位文字）",
    _b64_count >= 4 and _have_alts,
    "data URI=%d  alt齐=%s" % (_b64_count, _have_alts))
+
+# ---- [11] 今日成语（v1.8.9）：分段映射 + 居中绘制 + 随主题红绿 ----
+# 用户需求：红框区域（年份行与巨大数字之间的居中空带）按今日分数显示成语，
+# 分数取「生肖分优先，未选生肖用本日分」；字体参考箴/谶标题（华文中宋 Black）。
+# 分段表 + 边界值（每段首尾）全部钉死：
+_band_expect = [(0, "否极泰来"), (5, "否极泰来"), (9, "否极泰来"),
+                (10, "绝处逢生"), (19, "绝处逢生"),
+                (20, "转危为安"), (29, "转危为安"),
+                (30, "化险为夷"), (39, "化险为夷"),
+                (40, "逢凶化吉"), (49, "逢凶化吉"),
+                (50, "时来运转"), (59, "时来运转"),
+                (60, "渐入佳境"), (68, "渐入佳境"), (69, "渐入佳境"),
+                (70, "万事顺遂"), (79, "万事顺遂"),
+                (80, "吉星高照"), (89, "吉星高照"),
+                (90, "圆满无缺"), (98, "圆满无缺"), (100, "圆满无缺")]
+_bad = [(s, CalendarPage.idiom_for_score(s), want)
+        for s, want in _band_expect if CalendarPage.idiom_for_score(s) != want]
+ck("[11] 分数段→成语 映射 23 个边界值全对", not _bad, "错=%s" % _bad if _bad else "23/23")
+_hd2_src = inspect.getsource(CalendarPage._paint_header)
+ck("[11] 成语绘制：生肖分优先、无生肖用本日分",
+   'rep.get("score")' in _hd2_src and "fortune_score" in _hd2_src)
+ck("[11] 成语字体同箴/谶标题（ZH_FONT Black）+ 颜色随主题（dark）",
+   "ZH_FONT" in _hd2_src and "QFont.Black" in _hd2_src and "QPen(dark)" in _hd2_src)
+ck("[11] 成语居中绘制于 IDIOM_RECT",
+   "IDIOM_RECT" in _hd2_src and "Qt.AlignCenter" in _hd2_src)
+
+def _idiom_ink(d):
+    """渲染整页，返回成语带内的墨迹统计 (像素数, bbox中心x, bbox顶y, bbox底y)。
+    只统计 x 130–360 / y 96–140 —— 左「丙午年·马」墨迹止于 ~114、
+    右「节气」起于 ~369，巨大数字墨迹顶 ~144，均不会混进本窗口。"""
+    setup(d)
+    page.zodiac_report = None          # 未选生肖口径：用本日分数
+    page._sheen_t = 0.0
+    page.repaint()
+    img = page.grab().toImage()
+    n, xmin, xmax, ymin, ymax = 0, 9999, -1, 9999, -1
+    for yy in range(96, 141):
+        for xx in range(130, 361):
+            if img.pixelColor(xx, yy).lightness() < 128:
+                n += 1
+                xmin, xmax = min(xmin, xx), max(xmax, xx)
+                ymin, ymax = min(ymin, yy), max(ymax, yy)
+    if not n:
+        return 0, -1, -1, -1
+    return n, (xmin + xmax) // 2, ymin, ymax
+
+_ink_red = _idiom_ink(RED)
+_ink_green = _idiom_ink(GREEN)
+ck("[11] 红日页成语带内有墨迹（成语真的画出来了）", _ink_red[0] > 200,
+   "n=%d" % _ink_red[0])
+ck("[11] 绿日页成语带内有墨迹", _ink_green[0] > 200, "n=%d" % _ink_green[0])
+ck("[11] 成语水平居中（红/绿 bbox 中心均在页中线 260±12）",
+   abs(_ink_red[1] - 260) <= 12 and abs(_ink_green[1] - 260) <= 12,
+   "红中心=%s 绿中心=%s" % (_ink_red[1], _ink_green[1]))
+ck("[11] 成语墨迹留在本带内（y 98–138，不压巨大数字）",
+   _ink_red[2] >= 98 and _ink_red[3] <= 138 and
+   _ink_green[2] >= 98 and _ink_green[3] <= 138,
+   "红y=%s..%s 绿y=%s..%s" % (_ink_red[2], _ink_red[3],
+                              _ink_green[2], _ink_green[3]))
+
+# ---- [12] v1.9.0 → v1.9.2 累计修复 ----
+# v1.9.0 修复①：事业/感情/出行/财务 卡内文字会被截断，鼠标悬停停留后弹 tooltip 显示完整内容。
+# v1.9.0 修复②：未选生肖时下拉框显示「生肖 ⋯」，下拉样式随红/绿主题一致。
+# v1.9.1 修订②：未选只显示「生肖」两字（占位文本 + index=-1），悬停留出下拉，弹层滚轴主题化；
+#            废弃「生肖 ⋯」占位项与红色箭头块。
+# v1.9.2 修订②：收起判定排除 combo 自身几何（首次尝试，坐标系用错未根修）+ 生肖框去留白。
+# v1.9.3 修订②：闪烁根修（mapToGlobal 统一坐标系，见 [13] 组）+ 生肖框与八字框等宽 46。
+_page_src = inspect.getsource(CalendarPage)
+_mv_src = inspect.getsource(CalendarPage.mouseMoveEvent)
+_th_src = inspect.getsource(CalendarPage._theme_controls)
+
+rects = page._advice_rects()
+ck("[12] 建议卡命中几何方法存在且返回 4 张卡",
+   len(rects) == 4 and [k for k, _ in rects] == ["事业", "感情", "出行", "财务"],
+   "keys=%s" % [k for k, _ in rects])
+# 几何必须与 _paint_advice 完全一致（30,652 起；两列 224+12、两行 54+4）
+ck("[12] 建议卡几何与绘制一致（首卡 30,647 / 末卡 262,706，栏间距 5px，v1.9.5）",
+   rects[0][1] == QRect(30, 647, 227, 54) and rects[3][1] == QRect(262, 706, 227, 54),
+   "rects=%s" % [(k, r.getRect()) for k, r in rects])
+# 卡片整体在页内、不与版权行/底部按钮重叠（卡片底 760 < 版权行 762 < TAB 793）
+ck("[12] 建议卡全部落在页内且不压底部按钮/页脚",
+   all(r.x() >= 0 and r.y() >= 0 and r.bottom() <= page.PAGE_H
+       and r.bottom() < CalendarPage.COPYRIGHT_Y for _, r in rects),
+   "底=%d" % max(r.bottom() for _, r in rects))
+# mouseMoveEvent 必须接住卡片悬停并走 dwell 计时（停留才弹）
+ck("[12] 鼠标移动接住建议卡悬停（_advice_rects 命中）",
+   "_advice_rects" in _mv_src and "_hover_advice_key" in _mv_src)
+ck("[12] 悬停停留后才弹（dwell 计时器启动）",
+   "_dwell_timer.start" in _mv_src and "QToolTip.hideText" in _mv_src)
+ck("[12] 真正弹出完整建议（showText + info['advice']）",
+   inspect.getsource(CalendarPage._show_advice_tip).count("QToolTip.showText") >= 1
+   and "info[\"advice\"]" in inspect.getsource(CalendarPage._show_advice_tip))
+ck("[12] 卡片悬停给手型光标提示可交互",
+   "hit_key is not None" in _mv_src)
+ck("[12] 离开控件收起提示并复位状态",
+   "QToolTip.hideText" in inspect.getsource(CalendarPage.leaveEvent))
+# 修复②：生肖框未选显示「生肖 ⋯」，且 QSS 让下拉随主题红绿
+# 修复②（v1.9.1 修订）：未选生肖只显示「生肖」两字（占位文本 + index=-1，列表仅 12 生肖），
+# 悬停即弹出下拉，弹层滚轴随主题；此前「生肖 ⋯」占位项与红色箭头块均已废弃。
+ck("[12] 未选生肖只显示「生肖」两字（占位文本 + currentIndex=-1）",
+   'setPlaceholderText("生肖")' in _page_src and "setCurrentIndex(-1)" in _page_src
+   and 'addItem("生肖 ⋯"' not in _page_src,
+   "下拉列表仅含 12 生肖（无占位项）")
+ck("[12] 悬停弹出下拉（eventFilter Enter→150ms 计时→showPopup）",
+   "installEventFilter(self)" in _page_src
+   and "QEvent.Enter" in inspect.getsource(CalendarPage.eventFilter)
+   and "showPopup" in inspect.getsource(CalendarPage._open_zodiac_popup)
+   and "_zx_hover_timer" in _page_src)
+ck("[12] 生肖框与八字框等宽 46（列宽一致）",
+   page.zodiac_box.width() == 46 and page.btn_bazi.width() == 46,
+   "生肖=%d 八字=%d" % (page.zodiac_box.width(), page.btn_bazi.width()))
+_ef_src = inspect.getsource(CalendarPage.eventFilter)
+ck("[12] 离开收起（Leave→hidePopup，且鼠标不在弹层/combo 自身上时才收）",
+   "QEvent.Leave" in _ef_src
+   and "hidePopup" in _ef_src
+   and "mapToGlobal" in _ef_src
+   and "frameGeometry().contains" in _ef_src,
+   "v1.9.3 根修：mapToGlobal 统一坐标系（父坐标 contains 全局光标恒 False → 闪烁）")
+ck("[12] 弹层滚轴主题化（窄滚轴 + main 色把手 + 隐藏上下按钮）",
+   "QScrollBar::handle:vertical" in _th_src
+   and "QAbstractItemView::item" in _th_src
+   and "QScrollBar::add-line:vertical" in _th_src,
+   "把手随 main 红/绿，hover 加深为 dark")
+ck("[12] 红色箭头块已移除（drop-down 宽 0 + down-arrow 隐藏）",
+   "QComboBox::drop-down{border:none;width:0;}" in _th_src.replace(" ", "")
+   and "QComboBox::down-arrow{width:0;height:0;border:none;image:none;}"
+   in _th_src.replace(" ", ""),
+   "悬停弹出取代箭头按钮")
+ck("[12] 生肖下拉样式随主题（tooltip 全局配色含 box_bg/dark/main）",
+   "QApplication.instance().setStyleSheet" in _th_src and "QToolTip{" in _th_src
+   and "box_bg" in _th_src and "selection-color:#ffffff" in _th_src)
+# 弹层 QSS 用 %s 占位、再用主题变量 (box_bg/main/dark) 填充 → 随红/绿切换
+ck("[12] 生肖下拉弹层主题化（QAbstractItemView 用 box_bg + main 选中）",
+   "QAbstractItemView" in _th_src
+   and "selection-background-color:%s" in _th_src
+   and "selection-color:#ffffff" in _th_src
+   and "background:%s" in _th_src and "color:%s" in _th_src,
+   "selection 跟随 main 色（红/绿），文字白")
+
+# ---- [13] v1.9.3：闪烁根修（坐标系统一）+ 八字↔生肖联动 + 本日运势细化 ----
+# v1.9.2 的 geometry()（父坐标）contains QCursor.pos()（全局坐标）恒 False → 闪烁未除；
+# v1.9.3 用 mapToGlobal 把 combo 矩形映射到全局再比较，伪 Leave 判定才真正成立。
+ck("[13] 闪烁根修：收起判定 mapToGlobal 统一坐标系（父坐标≠全局坐标）",
+   "mapToGlobal" in _ef_src and "combo_rect.contains" in _ef_src,
+   "v1.9.2 用 geometry() 父坐标比全局光标恒 False，是闪烁未修好的根因")
+ck("[13] 选完生肖 600ms 内不自动重弹（activated 守卫）",
+   "_zx_on_activated" in _page_src
+   and "_zx_just_selected" in inspect.getsource(CalendarPage._open_zodiac_popup)
+   and "activated.connect" in _page_src)
+ck("[13] 八字↔生肖联动：录入后由年支自动选中生肖（含启动回显）",
+   "shengxiao" in inspect.getsource(ui_main.MainWindow._sync_zodiac_from_bazi)
+   and "findData" in inspect.getsource(ui_main.MainWindow._sync_zodiac_from_bazi)
+   and "_sync_zodiac_from_bazi" in inspect.getsource(ui_main.MainWindow._open_bazi)
+   and "shengxiao" in inspect.getsource(ui_main.MainWindow.__init__))
+ck("[13] 本日生肖细化为本日运势（有八字推演时换标签）",
+   "本日运势" in inspect.getsource(CalendarPage._paint_fortune)
+   and "bazi_text" in inspect.getsource(CalendarPage._paint_fortune),
+   "无八字仍显示「本日生肖」")
+
+# ---- [13b] v1.9.5：生肖统一两字显示（子鼠…亥猪）----
+from calendar_app.engine import SHENGXIAO_2CHAR
+_TWOCHAR_EXPECT = ["子鼠", "丑牛", "寅虎", "卯兔", "辰龙", "巳蛇",
+                   "午马", "未羊", "申猴", "酉鸡", "戌狗", "亥猪"]
+ck("[13b] 生肖两字表与用户约定完全一致（子鼠…亥猪）",
+   SHENGXIAO_2CHAR == _TWOCHAR_EXPECT, str(SHENGXIAO_2CHAR))
+ck("[13b] 下拉框显示两字生肖、data 仍存单字（findData 联动不破）",
+   [page.zodiac_box.itemText(i) for i in range(page.zodiac_box.count())]
+   == _TWOCHAR_EXPECT
+   and [page.zodiac_box.itemData(i) for i in range(page.zodiac_box.count())]
+   == ["鼠", "牛", "虎", "兔", "龙", "蛇", "马", "羊", "猴", "鸡", "狗", "猪"])
+ck("[13b] 年/日生肖文字经 ANIMAL_TO_2CHAR 转两字",
+   "ANIMAL_TO_2CHAR.get(info[\"lunar_year_shengxiao\"]" in inspect.getsource(CalendarPage._paint_header)
+   and "ANIMAL_TO_2CHAR.get(info[\"day_shengxiao\"]" in inspect.getsource(CalendarPage._paint_big_day))
+
+# ---- [14] v1.9.4：生肖底图缩到 90% + 配置路径可写兜底（frozen 只读目录） ----
+import ui.theme as _uit
+_src_wm = inspect.getsource(CalendarPage._paint_zodiac_watermark)
+ck("[14] 生肖水印恢复 v1.9.4 底部区块版式（×0.9=189、中线 260、20%，v1.9.6）",
+   "base_h = 189" in _src_wm and "260 - w // 2" in _src_wm
+   and "setOpacity(0.2)" in _src_wm and "block_top, block_bot = 574, 760" in _src_wm,
+   "水印居中压在 吉时/颜色+建议 底部区块（用户 image#6 指认区域）")
+ck("[14] 宜/忌中缝叠加 20% 八卦水印（居中 + 加大 110px，绘于文字之下，v1.9.8）",
+   "IMG_BAGUA" in inspect.getsource(CalendarPage._paint_yiji)
+   and "setOpacity(0.2)" in inspect.getsource(CalendarPage._paint_yiji)
+   and "wm_h = 110" in inspect.getsource(CalendarPage._paint_yiji),
+   "用户反馈「八卦透明度改到20%」：40%→20%")
+_src_sp = inspect.getsource(_uit.settings_path)
+ck("[14] 配置路径 frozen 回退 APPDATA（防只读目录无法保存）",
+   "APPDATA" in _src_sp and "settings_path" in _src_sp,
+   "frozen 下 exe 目录只读时回退到 %APPDATA%/农历日历/settings.json")
+
+# ---- [15] v1.9.7：生肖下拉渲染根修（显式 setFont 取代 QSS 字体）----
+# v1.9.6 用 QSS font-family:'Noto Serif SC' 渲染生肖，真机上 Qt 归一化多词族名
+# → 匹配不到内置族 → 「生肖整列/选中彻底不显示」（用户 image#1）。v1.9.7 改为
+# 与全页自绘文字同一条 setFamilies 路径（内置黑体优先），字号降至 12px 与八字同级。
+from calendar_app import fonts as _caf
+_zx = page.zodiac_box
+_zx_qss = _zx.styleSheet().replace(" ", "")
+_zx_le = _zx.lineEdit()
+_zx_vw = _zx.view()
+ck("[15] 生肖框字号统一 12px（与八字按钮同级，不再 15px 加大）",
+   _zx.font().pixelSize() == 12 and _zx_le.font().pixelSize() == 12
+   and _zx_vw.font().pixelSize() == 12,
+   "combo=%d lineEdit=%d view=%d"
+   % (_zx.font().pixelSize(), _zx_le.font().pixelSize(), _zx_vw.font().pixelSize()))
+ck("[15] 生肖下拉字体族含内置黑体 Noto Sans SC（setFont 而非 QSS，规避多词族名解析）",
+   _caf.SANS_FAMILY in _zx.font().families()
+   and _caf.SANS_FAMILY in _zx_le.font().families()
+   and _caf.SANS_FAMILY in _zx_vw.font().families(),
+   "combo/lineEdit/view 三处均 setFamilies(sans 优先)")
+ck("[15] QSS 不再声明字体（font-size/font-family 已移除，改由 setFont 控制）",
+   "font-size" not in _zx_qss and "font-family" not in _zx_qss
+   and "_apply_zodiac_fonts" in inspect.getsource(CalendarPage._theme_controls),
+   "QSS 只管配色/边框，字体走 setFont")
+ck("[15] 选中生肖居中（editable+readonly+AlignCenter，沿用 v1.9.6）",
+   _zx_le is not None and _zx_le.isReadOnly()
+   and bool(_zx_le.alignment() & Qt.AlignHCenter),
+   "QComboBox 非可编辑态无法用 QSS 对齐，行编辑居中是 Qt 惯用法")
+ck("[15] 下拉列表 item min-height 22px（容纳 12px 字）",
+   "min-height:22px" in _zx_qss, "弹层滚轴与选中态仍是主题色（[12] 组保底）")
+# v1.9.8 根修：combo 宽 46px → 弹层默认也 46px，扣滚轴+内边距后仅 ~20px，
+# 两字生肖(~24px) 被 delegate elide 成「…」。显式撑宽弹层（最宽条目 + 44px）。
+ck("[15] 下拉弹层显式撑宽（否则两字生肖被 elide 成「…」，v1.9.8）",
+   "setMinimumWidth" in inspect.getsource(CalendarPage._apply_zodiac_fonts)
+   and _zx_vw.minimumWidth() >= 60,
+   "view 最小宽 = %dpx（combo 宽仅 %dpx）" % (_zx_vw.minimumWidth(), _zx.width()))
+
+# ---- [16] v1.9.9：页高收紧 + 外框绝对下沿（版权行/边框 5px）+ 框外条 793 + 去叠页 ----
+_src_ft = inspect.getsource(CalendarPage._paint_footer)
+_src_bd = inspect.getsource(CalendarPage._paint_border)
+_src_pt = inspect.getsource(CalendarPage.paintEvent)
+ck("[16] 版权行 = 出行/财务 建议卡底线(760) 下（COPYRIGHT_Y=762）",
+   "self.COPYRIGHT_Y" in _src_ft and CalendarPage.COPYRIGHT_Y == 762,
+   "v1.9.7 下移到 781 致离 出行/财务 过远；v1.9.8 起退回 762")
+ck("[16] 内框下沿 783 = 版权行框底(778)+5px，外框 789、不再压字",
+   CalendarPage.FRAME_IN_BOTTOM == CalendarPage.COPYRIGHT_Y + 16 + 5
+   and CalendarPage.FRAME_OUT_BOTTOM == CalendarPage.FRAME_IN_BOTTOM + 6
+   and "self.FRAME_OUT_BOTTOM" in _src_bd and "self.FRAME_IN_BOTTOM" in _src_bd
+   and "self.PAGE_H - 80" not in _src_bd,
+   "用户反馈「版权信息和边框间隔也是 5px 避免重叠」：内框 776→783、外框 782→789")
+ck("[16] 底部四按钮距外框线 5px（TAB_Y=796 = 外框 789 + 7）",
+   CalendarPage.TAB_Y == CalendarPage.FRAME_OUT_BOTTOM + 7,
+   "v1.9.10 用户反馈「四个按钮距离外框改为 5px 间距」：外框 3px 线占 787..790，"
+   "TAB_Y-790-1=5 ⇒ 789+7=796（原 793 时仅 2px 空白）")
+ck("[16] 页高随之 838→841（提示行 + 本月/本日面板同步下移，页底仍 5px）",
+   CalendarPage.PAGE_H == 841
+   and CalendarPage.TAB_Y + CalendarPage.TAB_H + 2 + 12 + 5 == CalendarPage.PAGE_H,
+   "v1.9.10 按钮下移 3px：提示行与行事历面板同步下移，页底留白不变")
+ck("[16] 删除底部「叠页」装饰 _paint_stack（浅灰横带 #eeebe0）",
+   not hasattr(CalendarPage, "_paint_stack") and "_paint_stack" not in _src_pt,
+   "用户反馈「红框部分好像有一个灰色的框，删除」：满宽 y802..820 横带")
+
+# ---- [17] v1.9.9：八字运势得分重标定（修「分数普遍偏高」的公式偏移）----
+from datetime import timedelta as _td
+from calendar_app import engine as _eng
+_src_bz = inspect.getsource(_eng.bazi_day_report)
+ck("[17] 八字得分公式重标定：0.5*f+50+adj → 0.6*f+30+adj（去掉 +50 固定偏移）",
+   "* 0.6 + 30 + adj" in _src_bz and "* 0.5 + 50" not in _src_bz,
+   "用户反馈「八字输入后分数普遍比较高」：原式中位 83 / ≥80 占 64%")
+_bz = _eng.compute_eightchar(1994, 3, 21, 13)
+_bs = sorted(_eng.bazi_day_report(_bz, get_day_info(date(2026, 1, 1) + _td(days=i)))["score"]
+             for i in range(0, 365, 7))
+ck("[17] 抽样全年得分中位落在 60~75（不再人人 80+，保留八字优势）",
+   60 <= _bs[len(_bs) // 2] <= 75 and max(_bs) <= 98,
+   "中位=%d 范围=%d..%d" % (_bs[len(_bs) // 2], _bs[0], _bs[-1]))
+
+# ---- [18] v1.9.10：八字推行加粗 + 文案英文汉译 + 宜/忌居中 ----
+_src_zx = inspect.getsource(CalendarPage._paint_zodiac)
+ck("[18] 八字推演行加粗（_font(12, ZH_SONG, QFont.Bold)）",
+   "_font(12, ZH_SONG, QFont.Bold)" in _src_zx,
+   "用户反馈「八字推演 字体加粗」")
+_src_dp = inspect.getsource(CalendarPage._draw_para)
+_src_yj = inspect.getsource(CalendarPage._paint_yiji)
+ck("[18] 宜/忌内容水平居中（_draw_para 走 Qt.AlignHCenter，且仅宜/忌调用）",
+   "Qt.AlignHCenter" in _src_dp and "_draw_para" in _src_yj,
+   "用户反馈「宜 和 忌 的内容保持居中」")
+import re as _re18
+_en18 = []
+for _sx18 in ["鼠", "牛", "虎", "兔", "龙", "蛇", "马", "羊", "猴", "鸡", "狗", "猪"]:
+    for _t18 in _eng.analyze_zodiac_day(get_day_info(date(2026, 9, 30)), _sx18)["tips"]:
+        if _re18.search(r"[A-Za-z]{3,}", _t18):
+            _en18.append((_sx18, _t18))
+ck("[18] 生肖文案无英文残留（friction → 摩擦）",
+   not _en18, "含英文: %s" % _en18[:3])
+
+# ---- [19] v1.9.11：宜/忌跨行居中错位（行尾顿号）修复 + 软件 logo 更新 ----
+_src_wp = inspect.getsource(CalendarPage._wrap_px)
+ck("[19] _wrap_px 抹去换行点行尾顿号（修复跨行居中错位）",
+   'ln.endswith("、")' in _src_wp and "ln[:-1]" in _src_wp,
+   "用户反馈「因为最后一个、导致第二行与第一行错位」")
+_wl19 = CalendarPage._wrap_px(_fm_demi, "会亲友、出行、安床、祭祀、祈福、安葬", 92)
+ck("[19] 断行结果无任何行以「、」结尾（各行墨迹可精确居中）",
+   len(_wl19) >= 2 and all(not ln.endswith("、") for ln in _wl19), str(_wl19))
+# 反向验证：若保留行尾顿号，则该行墨迹中点会左偏（此处量化偏差以证明修法有效）
+_ln_sep = [ln + "、" for ln in _wl19]          # 模拟未抹除的旧行为
+_dev19 = []
+for _ln in _ln_sep:
+    _w_ink = _fm_demi.horizontalAdvance(_ln.rstrip("、"))
+    _w_full = _fm_demi.horizontalAdvance(_ln)
+    _dev19.append((_w_full - _w_ink) / 2.0)     # 居中时墨迹左偏量
+ck("[19] 旧行为确有左偏、新行为已消除（量化验证）",
+   max(_dev19) > 3 and all(_fm_demi.horizontalAdvance(ln) > 0 for ln in _wl19),
+   "旧左偏最大 %.1fpx / 新偏差 0px" % max(_dev19))
+ck("[19] logo.png 已替换为新版（1.03MB，旧版 32KB）",
+   os.path.getsize(IMG_LOGO) > 500000,
+   "logo.png = %d B" % os.path.getsize(IMG_LOGO))
+_ico19 = os.path.join(os.path.dirname(IMG_LOGO), "logo.ico")
+ck("[19] logo.ico 已按新版重生成（多尺寸，含 256²）",
+   os.path.exists(_ico19) and os.path.getsize(_ico19) > 100000,
+   "logo.ico = %d B" % (os.path.getsize(_ico19) if os.path.exists(_ico19) else -1))
 
 failed = [n for n, c, _ in R if not c]
 print("\n==== UI 复核 (v%s) ==== total=%d passed=%d failed=%d"

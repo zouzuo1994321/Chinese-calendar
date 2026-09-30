@@ -4,6 +4,195 @@
 
 ## 版本历史
 
+### v1.9.11 (Build 2609300012) — 2026-09-30
+
+- **修「宜 / 忌 跨行居中错位」（用户截图 image#1：居中 跨行 因为最后一个、导致第二行与第一行错位）**：
+  - **现象**：v1.9.10 把宜/忌内容改为水平居中（`Qt.AlignHCenter`）后，一旦列表**折成两行以上**，**行尾带「、」的那一行其墨迹会整体左移约半个顿号**，与相邻行看起来「错位」。14px DemiBold 下实测左偏约 **7.0px**。
+  - **根因**：`_wrap_px` 按「标点不落行首」把顿号**粘在前一个条目之后**（`unit = part + "、"`）。于是当断行点落在某个完整条目之后时，**该行的行尾会残留一个全角「、」**；而 `Qt.AlignHCenter` 是**按整行字宽**（含这个行尾顿号）居中——顿号只占右侧近半个字的空白，居中后**可见文字整体被挤向左**，与不带顿号的相邻行错位。行末的顿号本身在换行处也是多余的（列表在下一行继续）。
+  - **修法**：`_wrap_px` 断行完成后，**统一抹去每行的行尾顿号**（`lines = [ln[:-1] if ln.endswith("、") else ln for ln in lines]`），每行随即按**自身可见文字宽度**精确居中。断行决策仍在抹除之前完成，故**行数、断点位置不变**。
+  - **备选方案（未采用）**：折行时保留行尾顿号、仅**排除其宽度**做「悬挂标点」（optical centering）。该法不丢字符，但会在居中行的右缘留下一个悬空的顿号，观感上易被误读为排版错误；抹除法改动最小、输出最干净，故选抹除。
+  - **实测**：离屏渲染整页，扫描 **2026 全年 40 个确有跨行的日期**，逐行取宜/忌文字区（y 422..476）墨迹 bbox 并比较各行墨迹中点横坐标——**最差极差 1.00px**（像素取整所致，旧行为左偏 7.0px）。断行结果示例：`['会亲友', '出行、安床', '祭祀、祈福', '安葬']`（**无任何行以「、」结尾**）。
+- **软件 logo 全量更新（用户截图 image#2：logo-2.png）**：
+  - **新图标**：朱红底 + 鎏金云纹 + 金色「历」字（1024×1024）。
+  - **落地**：`logo-2.png` → **覆盖 `logo.png`**（窗口图标 / 系统托盘 / 对话框 / exe 资源均引用该名，无需改代码）；按新图**重生成 `logo.ico`**（Pillow，多尺寸 16 / 24 / 32 / 48 / 64 / 128 / **256**²）。旧图标归档至 `history/logo_prev_1.9.10/`。
+- **验证**：`verify_ui.py` **130/130 → 136/136**（新增 `[19]` 组 5 条：抹除行尾顿号 / 断行无行尾顿号 / 旧行为左偏量化 / logo.png 已换新 / logo.ico 多尺寸；另在版本组新增 1 条 logo 素材断言；版本号断言随 v1.9.11 更新）✓ · `probe_inspect_v111.py`（新增）**6/6** ✓ · `ui_agenda_probe.py` **43/43** ✓ · `agenda_checks.py` **34/34** ✓ · `test_process.py` **18/18** ✓ · `geom_probe.py` 通过 ✓ · `probe_inspect_v110.py` **10/10** ✓ · `font_weight_probe.py` **5/5**（真实平台）✓。
+- **改动文件**：`ui/page.py`（`_wrap_px` 抹除行尾顿号 + 注释）、`calendar_app/version.py`、`logo.png` / `logo.ico`（更新）、`tools/dev_checks/verify_ui.py`、`tools/dev_checks/probe_inspect_v111.py`（新增）、`README.md`、`CHANGELOG.md`。
+
+### v1.9.10 (Build 2609300011) — 2026-09-30
+
+- **底部四按钮距外框改 5px、提示行与行事历面板同步下移（用户截图 image#1）**：
+  - **现象**：外框下沿 3px 线（`FRAME_OUT_BOTTOM=789`，实测占 y **787..790**）与底部四按钮（关于本软件 / 本月行事历 / 本日行事历 / 导入行事历）之间只剩 **2px** 空白，视觉上几乎贴着框线。
+  - **修法**：`TAB_Y` **793 → 796**（`FRAME_OUT_BOTTOM + 7`）→ 按钮上沿线 796，与框线空白行 791..795 = **5px** ✓；页高 `PAGE_H` **838 → 841** 随之 +3，使「（双击按钮 打开/关闭 对应面板）」提示行（824..836）与下方 **本月 / 本日行事历面板同步下移 3px**，页底留白仍为 5px。
+  - **实测**：离屏渲染逐行统计 —— 外框线 787..790、按钮上沿 796（空白 791..795，**5px**）。
+- **八字推演行加粗（用户截图 image#2）**：`_paint_zodiac` 的推演行字体 `_font(12, ZH_SONG)` → **`_font(12, ZH_SONG, QFont.Bold)`**。内置 Noto Serif SC 带真实 Bold 面（真机字重实测 Normal 497 / **Bold 614** / Black 692 像素），故直接 `QFont.Bold` 即真实加粗——**不可用 `setItalic`**（会吞掉字重轴，见 `theme._font`）。
+- **文案英文汉译（用户截图 image#3）**：生肖路径 `analyze_zodiac_day` 的相刑提示 `"与日支相刑， friction 易起…"` → **`"与日支相刑，摩擦易起，忍让为先，不宜争执硬顶"`**。另经 AST 全量扫描（`engine.py / page.py / ui_main.py / dialogs.py / theme.py / agenda.py / agenda_pdf.py`）确认：**全部用户可见文案中已无英文残留**（仅保留有意为之的品牌名 Copyright / 肆月Aperture、Build 版本标签与 Excel / CSV / PDF / Word 文件格式词）；12 生肖全部提示语实测含英文字符数 = **0**。
+- **宜 / 忌 内容水平居中（用户截图 image#4）**：`_draw_para`（**仅** 供宜/忌两处调用）对齐由 `Qt.AlignLeft` → **`Qt.AlignHCenter`**，宜/忌列表按框宽居中排布。
+- **验证**：`verify_ui.py` **127/127 → 130/130**（新增 `[18]` 组 3 条：八字推演加粗 / 宜忌居中 / 文案无英文；`[16]` 组 2 条改写为「按钮距外框 5px」「页高 841」；`[4]`/版本断言随页高与版本号更新）✓ · `ui_agenda_probe.py` **43/43** ✓ · `agenda_checks.py` **34/34** ✓ · `test_process.py` **18/18** ✓ · `geom_probe.py` 通过 ✓ · `font_weight_probe.py` **5/5**（真实平台）✓ · `pyflakes` 零输出 ✓ · `probe_inspect_v110.py`（新增，合并 gap/居中/八字加粗三项实测）**10/10**：外框线 787..790、按钮上沿 796、空白 **5px**、宜/忌墨迹中点偏差 ≤8px、八字推演 Bold 存在 ✓。
+- **改动文件**：`ui/page.py`（`PAGE_H` 841 / `TAB_Y` 796 / `_paint_zodiac` 加粗 / `_draw_para` 居中）、`calendar_app/engine.py`（相刑文案汉译）、`calendar_app/version.py`、`tools/dev_checks/verify_ui.py`、`tools/dev_checks/probe_inspect_v110.py`（新增）、`README.md`、`CHANGELOG.md`。
+
+### v1.9.9 (Build 2609300010) — 2026-09-30
+
+- **版权行与边框 5px、互不重叠（用户截图 image#1）**：
+  - **现象**：版权行文字下缘**正压在内框线（776）上**，二者视觉重叠。
+  - **修法**：外框/内框下沿改为**绝对坐标**（不再由 `PAGE_H` 推导）——外框 `FRAME_OUT_BOTTOM=789`、内框 `FRAME_IN_BOTTOM=783`；版权行框 762..778，到内框恰好 **5px**。实测版权行墨迹 767..777、内框线 782，间隔 **5px** ✓。改为绝对坐标后，缩短页高也不会把外框带着一起上移。
+- **删除框外条那条浅灰横带（用户截图 image#2「红框部分好像有一个灰色的框，删除」）**：
+  - **根因**：`_paint_stack`（底部「叠页」装饰）在 `y 802..820` 画了 4 条自内向外收窄的矩形，填充 `#eeebe0`（RGB 238,235,224）/`#f3f0e6`，满宽压在框外条区域——**颜色与截图实测横带完全一致**，确认即此装饰。
+  - **修法**：删除 `_paint_stack` 及其调用（连带 `PAPER_EDGE` 在 `page.py` 的导入）。实测框外条区域 `#eeebe0` 最大同色行长 **0px**。
+- **提示行下方留白过大（用户截图 image#3）**：
+  - **现象**：页面固定 520×848，而外框下沿 789、TAB 行 793..819、提示行 821..833 —— 提示行以下还空 22px 纸面，再加布局间距 4px + 面板内缩 2px，**提示行到行事历面板约 28px 空白**。
+  - **修法**：页高 `PAGE_H` **848 → 838**；TAB 行随外框下移到 `TAB_Y=793`，提示行 821..833，页底留白 **22px → 5px**（提示行到面板约 11px）。
+- **八字运势得分重标定（用户提问：94年3月21日13时录入后分数普遍偏高，是计算问题还是本就这样）**：
+  - **诊断结论：是计算问题（公式标定偏移），不是排盘错误、也不是命盘特性。** 原式 `score = clamp(fortune_score*0.5 + 50 + adj, 5, 98)` 的 **+50 固定偏移**使 `adj=0` 时得分已 ≈80（当日基础分中位 60）；2026 全年 365 天实测**中位 83、均值 82.3、64% 的天数 ≥80**。换 8 个不同出生日期（1963~2001）中位依旧 **82~83**，与八字无关——即「人人都是 80+」。
+  - **四柱经核验正确**：1994-03-21 13:00（公历）→ **甲戌 · 丁卯 · 丙午 · 乙未**（1994 甲戌年 ✓、卯月丁卯 ✓（甲己之年丙作首）、未时乙未 ✓（丙辛日起戊子））。
+  - **修法（本轮选定「中度强化」）**：`score = clamp(fortune_score*0.6 + 30 + adj, 5, 98)` → 中位 **69**、均值 68.3、范围 34..97（旧值中位 83、≥80 占 64%）；仍保留八字比生肖路径（`fortune_score + adj`，中位 64）更亮眼的「强化」定位，但不再人人 80+。
+- **验证**：`verify_ui.py` **123/123 → 127/127**（新增 `[17]` 组 2 条八字标定断言；`[16]` 组 5 条重写；`[4]`/`[12]` 随页高/边框收敛）✓ · `ui_agenda_probe.py` **43/43** ✓ · `agenda_checks.py` **34/34** ✓ · `test_process.py` **18/18** ✓ · `geom_probe.py` 通过 ✓ · `font_weight_probe.py` **5/5**（真实平台）✓ · `pyflakes` 零输出 ✓ · `probe_inspect_v199.py` 真机实测：页 520×838、版权行墨迹 767..777、内框线 782（间隔 5px）、框外条 `#eeebe0` 同色行长 0px、页底留白 5px ✓。
+- **改动文件**：`ui/page.py`（`PAGE_H` + 新增 `FRAME_OUT_BOTTOM`/`FRAME_IN_BOTTOM` / `_paint_border` 绝对下沿 / `TAB_Y` / 删 `_paint_stack`）、`calendar_app/engine.py`（`bazi_day_report` 得分重标定）、`calendar_app/version.py`、`tools/dev_checks/verify_ui.py`、`tools/dev_checks/probe_inspect_v199.py`（新增）、`README.md`、`CHANGELOG.md`。
+
+### v1.9.8 (Build 2609300009) — 2026-09-30
+
+- **根修生肖下拉「整列仍显示…」（用户截图 image#3：生肖字体显示还是没有修复）**：
+  - **现象**：顶栏选中生肖（如「戌狗」）已能正常显示，但**点开下拉列表后，12 项两字生肖被裁成「…」**——看起来仍像「没修好」。v1.9.7 的显式 `setFont` 只治好了「选中显示」，漏掉了**弹层自身的宽度**。
+  - **真正根因**：`QComboBox` 的弹出视图默认**继承 combo 的宽度（仅 46px）**；扣除 10px 滚轴 + 左右 padding 后仅剩 ~20px，而两字生肖（12px 黑体）实测需 ~24px → 逐项 elide 成「…」。源码/离屏环境因弹层可自由撑开而未暴露（真实平台探针 `elide('子鼠', 46-26)='…'` 复现、`setMinimumWidth(96)` 即修复）。
+  - **修法**：`_apply_zodiac_fonts()` 内对 `view()` 计算**全部 12 项最大字宽**，`view().setMinimumWidth(最宽 + 44)`（实测 68px），确保两字生肖完整显示。
+- **八卦水印透明度 40% → 20%（用户截图 image#2：八卦透明度改到20%）**：宜/忌中缝八卦水印 `setOpacity(0.40)` → **`0.20`**，更淡、不抢五行神位文字；v1.9.7 的「加大(110) + 竖向居中」沿用。
+- **版权行与外框底 5px + 框外条同步上移（用户截图 image#1：版权信息 和 边框 上移，与 出行/财务 距离 5px）**：
+  - **更正 v1.9.7 的错解**：v1.9.7 将版权行下移到 781（贴外框下沿）**方向反了**——用户要的是版权行**回到**「出行/财务 建议卡底线(760) 下 5px」，即 `COPYRIGHT_Y` **781 → 762**（墨迹顶 ≈767）。
+  - **外框上移**：`_paint_border` 外框下沿 `PAGE_H-100`(802) → **`PAGE_H-80`(782)**、内框 796 → **776**、角点 802 → **782**，由「外框上移」而非「版权行下移」达成底部紧凑。
+  - **框外条同步**：TAB 按钮 `TAB_Y` **804 → 786**（贴住新外框下沿 782），提示行随 `TAB_Y` 联动。
+- **验证**：`verify_ui.py` **121/121 → 123/123**（`[15]` 新增弹层撑宽 1 条 / `[16]` 版权+外框+框外条 3 条重写 / `[14]` 八卦 20% / `[4]` 角点 PAGE_H-66 / `[12]` 底部 786-26）✓ · `ui_agenda_probe.py` **43/43** ✓ · `agenda_checks.py` **34/34** ✓ · `test_process.py` **18/18** ✓ · `geom_probe.py` 通过 ✓ · `font_weight_probe.py` **5/5** ✓ · `probe_inspect_v198.py` 真机实测：生肖框选中「午马」深墨 78px、占位「生肖」44px、**弹层宽 68px 且 elide('子鼠', 68-26)='子鼠'**（核心修复）、中缝八卦 tint=211(20%) 仍可见、神位墨迹中心 260.5（缝中心 261）、版权墨迹顶 767..775、外框下沿 782、TAB_Y=786 ✓。
+- **改动文件**：`ui/page.py`（`_apply_zodiac_fonts` 弹层撑宽 / `_paint_yiji` 八卦 20% / `_paint_border` 外框上移 / `COPYRIGHT_Y` + `TAB_Y`）、`calendar_app/version.py`、`tools/dev_checks/verify_ui.py`、`tools/dev_checks/probe_inspect_v198.py`（新增）、`README.md`、`CHANGELOG.md`。
+
+### v1.9.7 (Build 2609300008) — 2026-09-30
+
+- **根修生肖字体「彻底不显示」+ 与八字字号不一致（用户截图 image#1/#2）**：
+  - **现象**：生肖下拉选中 / 整列**完全不显示字形**；且生肖字号(15px)与紧邻「八字」按钮(12px)不一致。
+  - **真正根因（推翻 v1.9.6 的诊断）**：`fontTools` 核验——随包 5 份内置字体子集（Noto Sans/Serif SC 各字重）**均含全部生肖字形**（7554 字形，GB2312 全集），故「黑体子集缺字形」**不成立**。真实变量是 **Qt 对 QSS `font-family` 多词族名的归一化**：QSS 里 `'Noto Sans SC'` 被归一为 `NotoSansSC`，**匹配不到已注册的『Noto Sans SC』**，真机回退链也命不中 → 字形整列不显示（源码/离屏环境恰有系统兜底，故旧探针全绿掩盖了它）。
+  - **修法**：**不再用 QSS 声明字体**，改由 `_apply_zodiac_fonts()` 对 **combo / 行编辑 / 下拉视图三处显式 `setFont`**（`setFamilies(sans 优先)` + `setPixelSize(12)`）——与全页自绘文字同一条 `setFamilies` 路径（内置黑体优先、系统字体兜底），彻底绕开 QSS 族名解析。字号 15px → **12px**，与「八字」按钮同级。
+- **加大八卦区域 + 神位方向字体加大加粗（用户截图 image#3）**：
+  - 宜/忌中缝八卦水印 `wm_h` **88 → 110**，并由底部对齐改**竖向居中**，八卦区域更醒目；仍 40% 透明度绘于文字之下。
+  - 五行神位文字（喜神/财神/福神/冲煞/禄）**11px → 13px Bold**（`row_h` 17 → 18），方向信息更醒目，仍水平居中于中缝。
+- **版权行与外框下沿 5px + 框外条同步上移（用户截图 image#4）**：
+  - 版权行 `COPYRIGHT_Y` **762 → 781**：v1.9.6 误移到「建议卡下 5px」，现改为**外框下沿(802) 上 5px**（墨迹顶 ≈786）。
+  - 框外条（本月/本日行事历 TAB 按钮 + 提示行，位于外框之下）`TAB_Y` **808 → 804**，贴住外框下沿，与版权行形成对称紧凑的底部布局。
+- **验证**：`verify_ui.py` **118/118 → 121/121**（`[15]` 生肖渲染根修 4 条重写 / `[16]` 版权+框外条 2 条重写 / `[14]` 八卦加大 / `[6]` 神位 13px Bold / `[12]` 底部 tab 804）✓ · `ui_agenda_probe.py` **43/43** ✓ · `agenda_checks.py` **34/34** ✓ · `test_process.py` **18/18** ✓ · `geom_probe.py` 通过 ✓ · `pyflakes` 零输出 ✓ · `probe_inspect_v197.py` 渲染实测：生肖框选中「午马」**深墨 65px**、占位「生肖」**23px**（字形真的渲染）、combo/lineEdit/view 字号 12/12/12 + 内置黑体、神位墨迹中心 260（缝中心 261）、中缝八卦 tint=199、底部水印 tint=737、版权墨迹顶 786（外框下沿-16）✓。
+- **改动文件**：`ui/page.py`（`_apply_zodiac_fonts` 新增 / `_theme_controls` 生肖 QSS 去字体 + setFont / `_paint_yiji` 八卦加大 + 神位 13px Bold / `COPYRIGHT_Y` + `TAB_Y`）、`calendar_app/version.py`、`tools/dev_checks/verify_ui.py`、`tools/dev_checks/probe_inspect_v197.py`（新增）、`README.md`、`CHANGELOG.md`。
+
+### v1.9.6 (Build 2609300007) — 2026-09-30
+
+> ⚠ **根因更正（v1.9.7）**：本节下方「内置黑体子集缺生肖字形 → 整列 --」的判断**已被推翻**——经 `fontTools` 核验，内置字体子集**均含全部生肖字形**；真正原因是 QSS 多词族名归一化（详见 v1.9.7 条目）。v1.9.6 改用宋体族只是巧合过了源码环境，真机仍不显示。
+
+- **根修生肖下拉「整列显示 --」（用户截图 image#1）**：
+  - **现象**：点开生肖下拉，12 个两字生肖（子鼠…亥猪）整列渲染成「--」，无一可读。
+  - **当时判断（已更正，见上）**：`_theme_controls` 里 `QComboBox` / `QComboBox QAbstractItemView` 的 `font-family` 用的是 `calendar_app_fonts.sans_css()`——曾以为内置 **Noto Sans SC 子集缺生肖字形** → 落 `.notdef`。
+  - **当时修法**：`fonts.py` 新增 `serif_css()`；QComboBox / 下拉视图 / 内嵌行编辑**三处全部改宋体族**（v1.9.7 已改为显式 `setFont`）。
+- **选中生肖加大并居中（用户截图 image#2）**：Qt 的 QComboBox 非可编辑态显示文字无法用 QSS 对齐，改用 Qt 惯用法——**可编辑 + 只读 + 行编辑 `AlignCenter`**（`NoFocus` 防文本光标、`NoInsert` 防输入污染、`setTextMargins(0)`）；选中显示 12px → **15px** 居中，下拉列表 14px（item `min-height` 22 → 24px）。
+- **宜 / 忌中缝版式（用户红框 image#3/#4 + 八卦素材 image#5）**：
+  - 五行神位信息（喜神 / 财神 / 福神 / 冲煞 / 禄）**水平居中**（原 AlignLeft，实测墨迹中心 218 → 259.5，缝中心 261）；
+  - 中缝叠加 **40% 透明度八卦水印**（`八卦.png`，底部对齐、绘于文字之下）——恢复 v1.8.x「中栏底部八卦底纹」特性（该特性在 v1.9.3/1.9.5 版式回退中丢失）。
+- **生肖剪影水印回底部区块（用户 image#6 指认区域）**：撤销 v1.9.5 的「中缝居中」，恢复 v1.9.4 版式——**×0.9（高 189px）、水平居中（中线 260）、垂直居中压在 吉时/颜色+建议 卡片区块（574..760）上，20% 透明度**，绘于页脚前（版权行不受影响）。
+- **版权行与卡片框体间隔 5px（用户红框 image#7）**：版权行由 `PAGE_H-70`（与建议卡底线间隔 23px，底部最后一个非 5px 间隔）上移到 **`COPYRIGHT_Y=762`**——建议卡底线(760) 下 5px 视觉间隔，与 R1~R4 的 5px 系列对齐。
+- **验证**：`verify_ui.py` **118/118**（新增 `[14]` 八卦水印 / `[15]` 下拉字体+居中 3 条 / `[16]` 版权间隔）✓ · `ui_agenda_probe.py` **43/43** ✓ · `agenda_checks.py` **34/34** ✓ · `test_process.py` **18/18** ✓ · `geom_probe.py` 通过 ✓ · `pyflakes` 零输出 ✓ · `probe_inspect_v196.py` 渲染实测：神位墨迹中心 259.5（缝中心 261）、中缝八卦灰墨可见、底部水印 tint=737、版权墨迹顶 767（卡片底线+5px 口径）、选中「午马」15px 居中 + data 单字联动不破 ✓。
+- **改动文件**：`ui/page.py`（`_build_controls` 行编辑居中 / `_theme_controls` QSS 宋体+加大 / `_paint_yiji` 居中+八卦水印 / `_paint_zodiac_watermark` 底部区块 / `_paint_footer`+`COPYRIGHT_Y`）、`calendar_app/fonts.py`（`serif_css()`）、`calendar_app/version.py`、`tools/dev_checks/verify_ui.py`、`tools/dev_checks/probe_inspect_v196.py`（新增）、`README.md`、`CHANGELOG.md`。
+
+### v1.9.5 (Build 2609300006) — 2026-09-30
+
+- **根修 v1.9.3 / v1.9.4 八字「录入后不保存 + 生肖不同步」（用户反馈 v1.9.4 什么问题都没解决）**：
+  - **现象**：真机录入八字点保存后信息不保存、生肖下拉也不联动更新。
+  - **真正根因**：`ui_main._open_bazi` 里 `dlg.exec() == dlg.Accepted` —— PySide6 6.11 的 `Accepted` 枚举**只存在于类上**，在对话框**实例**上访问 `dlg.Accepted` 直接抛 `AttributeError`；异常被 Qt 槽静默吞掉，**保存 / 生肖联动 / 配置落盘一行都没执行**。此前 v1.9.4 定位的「只读目录配置失败」只是并发因素而非主因；离屏探针全部通过是因为它们直接调用方法，从未走到 `dlg.exec()` 这一行（离屏照不到的真机坑）。
+  - **修法**：改为类级比较 `dlg.exec() == QDialog.DialogCode.Accepted`。
+  - **验证**：`probe_bazi_full.py` 全链路探针（去掉 `try/except` 兜底）实测：修复前抛 `AttributeError`，修复后完整走通 保存 → `_sync_zodiac_from_bazi` 联动 → `_save_settings` 落盘 → 重启回显。
+- **生肖统一两字显示**（用户点名：子鼠、丑牛、寅虎、卯兔、辰龙、巳蛇、午马、未羊、申猴、酉鸡、戌狗、亥猪）：
+  - `engine.py` 新增 `SHENGXIAO_2CHAR`（两字表）与 `ANIMAL_TO_2CHAR`（单字 → 两字映射）；
+  - 生肖下拉框**显示两字**、`data` 仍存单字（`findData(单字生肖)` 的八字联动零影响）；
+  - 年生肖「乙巳年 · 巳蛇」、日生肖「庚辰日 · 属辰龙」、本日生肖 / 本日运势「午马」「巳蛇」、八字对话框预览「生肖：巳蛇」**全部转两字**。
+- **宜 / 忌区域回退 v1.9.3 版式**（用户截图对比需求「这块区域回退到上一版本」）：
+  - 撤销 v1.9.4 的满宽 224：宜 / 忌恢复**窄 150 双栏**（x=30 / x=340，高 95），喜神 / 财神 / 福神 / 冲煞 / 岁煞五行神位信息**回中缝竖排 5 行**；生肖剪影水印回退到**中缝居中**（×0.9 缩放保持）。
+  - 窄栏 140px 文字宽下三年逐日最多 3 行（2026-01-06 宜共 23 字），文字区扩到 54px 高 + `_draw_para` 上限 3 行、末行 elide 兜底不裁切。
+- **四处间隔统一 5px**（用户红框标注 R1/R2/R3/R4「间隔都改为5px」）：
+  - **R1** 宜 / 忌框 ↔ 本日运势行：框高 82 → 95（384..479 ↔ 484）→ **5px**；
+  - **R2** 左右栏列间距：吉时 / 颜色框 224+12 → **227 / 228 + 5px**（30..257 / 262..490），建议卡同步 227+5；
+  - **R3** 时辰行 ↔ 事业行：建议卡 y 652 → 647（642 底 ↔ 647 顶）→ **5px**；
+  - **R4** 事业行 ↔ 出行 / 财务行：行间距 +4 → +5（701 底 ↔ 706 顶）→ **5px**。
+- **验证**：`verify_ui.py` **113/113**（新增 `[13b]` 组 3 条两字生肖断言；`[6][7][12][14]` 断言随版式回退重写）✓ · `ui_agenda_probe.py` **43/43** ✓ · `agenda_checks.py` **34/34** ✓ · `test_process.py` **18/18** ✓ · `geom_probe.py` 通过 ✓ · `pyflakes` 零输出 ✓ · `probe_render_v195.py` 渲染实测 R1/R2/R3/R4 **全 5px** + 两字生肖 + 八字联动「巳蛇」✓。
+- **改动文件**：`ui/page.py`（`_paint_yiji` 回退窄栏 + 中缝神位 / `_paint_hours_colors` / `_advice_rects` / `_paint_advice` 5px / `_paint_zodiac_watermark` 中缝居中 / 两字生肖）、`ui/dialogs.py`（预览两字）、`ui_main.py`（`dlg.Accepted` 根修）、`calendar_app/engine.py`（两字表）、`calendar_app/version.py`、`tools/dev_checks/verify_ui.py`、`tools/dev_checks/probe_render_v195.py`（新增）、`README.md`、`CHANGELOG.md`。
+
+### v1.9.4 (Build 2609300005) — 2026-09-30
+
+- **根修 v1.9.3 八字等配置「无法保存」（真机实测失效）**：
+  - **现象**：v1.9.3 录入八字保存后无反应，生肖不联动、本日运势标签也不切换；代码逻辑（BaziDialog 保存 → `_sync_zodiac_from_bazi` 回显 → `_paint_fortune` 标签决策）经数据层核验本应正确。
+  - **真正根因**：frozen 单文件 exe 的 `SETTINGS_PATH` 指向 **exe 同目录**；当用户把 exe 放在 `Program Files`、网络盘等**只读目录**时，`_save_settings` 写 `settings.json` **静默失败**（异常被吞），导致八字/生肖/本日运势三项全部「不生效」——并非逻辑 bug，而是配置落盘失败。
+  - **修法**：新增 `settings_path()` —— frozen 下 exe 目录只读或尚未生成且不可写时，**回退到 `%APPDATA%/农历日历/settings.json`**（可读写）；`_save_settings` 写前 `os.makedirs(d, exist_ok=True)` 保证目录存在；`_apply_zodiac` 整体包 `try/except` 兜底，任一异常都 `set_zodiac_report(None)` 复位，避免整页绘制崩溃。
+- **宜 / 忌 满宽化 224（用户截图红/蓝框对齐需求）**：
+  - **需求**：截图标注「蓝框（宜/忌栏）统一成红框宽度」，红框即吉凶时辰/建议的 **224 满宽栏**。
+  - **取舍**：页面存在两组列宽体系（窄栏 150 / 满宽 224），224×3 放不下，故采纳 **「宜忌满宽化 224」** 方案——宜/忌两栏由 150 改为 **满宽 224 双栏**（与吉凶时辰、建议卡完全对齐），中栏三栏（y=322）保持 150 不变。
+  - **连带调整**：宜/忌框中间原 160px 中缝放着的 **喜神/财神/福神/冲煞/禄** 挪到宜/忌框**下方独立一行**（满宽 5 槽等分，每槽 92px，超长项 `elide` 兜底绝不溢出）。
+- **生肖水印底图缩到 90%**（用户需求「把生肖的底图缩小到 90%」）：`_paint_zodiac_watermark` 高度基准 `210 → 189`（`× 0.9`），水平居中不变。
+- **验证**：`verify_ui.py` **110/110**（新增 `[14]` 组 2 条：水印 90% / frozen 配置回退 APPDATA；`[6]` 神位信息行改测 elide 后宽度）✓ · `ui_agenda_probe.py` **43/43**（修正其测试钩子对 `theme.SETTINGS_PATH` 的 patch，因 `settings_path()` 改读 theme 全局）✓ · `agenda_checks.py` **34/34** ✓ · `test_process.py` **18/18** ✓ · `font_weight_probe.py` **5/5** ✓ · `geom_probe.py` 通过 ✓。
+- **改动文件**：`ui/page.py`（`_paint_yiji` 满宽 224 双栏 + 神位信息行下移 / `_paint_zodiac_watermark` 缩 90%）、`ui/theme.py`（`settings_path()`）、`ui_main.py`（`_save_settings` 写前建目录 / `_apply_zodiac` 兜底）、`calendar_app/version.py`、`tools/dev_checks/verify_ui.py`、`tools/dev_checks/ui_agenda_probe.py`、`README.md`、`CHANGELOG.md`。
+
+### v1.9.3 (Build 2609300004) — 2026-09-30
+
+- **根修悬停下拉闪烁**（用户 v1.9.2 截图反馈：仍在闪）：
+  - **真正的根因**：v1.9.2 的收起判定 `self.zodiac_box.geometry().contains(QCursor.pos())` 拿的是**父坐标系**几何，而 `QCursor.pos()` 是**全局屏幕坐标** —— 页面居中于窗口内，两个坐标系原点不同，`contains` **恒为 False**。于是 popup 打开瞬间的伪 Leave 依旧被误判为「光标已离开」→ `hidePopup()` → 开关循环，闪烁只是减轻并未根除。
+  - **修法**：用 `mapToGlobal(QPoint(0,0))` 把 combo 矩形映射到全局坐标系再与光标比较（`combo_rect = QRect(mapToGlobal(0,0), size())`），收起判定统一为全局坐标 —— 光标仍在 combo 上（伪 Leave）或仍在弹层上时都不收起。
+  - **附修**：新增 `activated` 守卫 —— 鼠标选完生肖后 600ms 内不自动重弹（否则弹层关闭后因悬停立即再次弹出）。
+- **生肖框与八字框等宽**（用户反馈「生肖列宽和八字列宽保持一致」）：生肖框 `44 → 46`px 与八字框一致，顶栏顺延 2px（前/后一日/撕页/今日右移，透明度滑块与窗控锚点不变）。
+- **新增 八字↔生肖联动**（用户需求「输入八字后应该与生肖联动，自动识别生肖」）：
+  - 录入八字保存后，由八字**年支生肖**自动选中页顶下拉框（`_sync_zodiac_from_bazi`：`findData(shengxiao)` → `setCurrentIndex`）；启动时已存八字同样回显到下拉框。行为探针实测：八字 1992-08-15 → 年支生肖**猴** → 下拉框自动选中「猴」→ 当日报告 name=猴。
+- **「本日生肖」细化为「本日运势」**（用户需求）：已录入八字（当日报告带 `bazi_text`）时，分数旁标签由「本日生肖」换为「**本日运势**」（八字推演口径；未录八字仍显示「本日生肖」）。
+- **验证**：`verify_ui.py` **106/106 → 110/110**（新增 `[13]` 组 4 条：mapToGlobal 根修 / activated 守卫 / 八字联动 / 本日运势标签）✓ · 联动行为探针 OK ✓ · `ui_agenda_probe.py` **43/43** ✓ · `agenda_checks.py` **34/34** ✓ · `test_process.py` **18/18** ✓ · `font_weight_probe.py` **5/5** ✓ · `geom_probe.py` 通过 ✓。
+- **改动文件**：`ui/page.py`（`eventFilter` mapToGlobal / `_open_zodiac_popup` 守卫 / `_zx_on_activated` / 顶栏几何 / `_paint_fortune` 标签）、`ui_main.py`（`_sync_zodiac_from_bazi` / `_open_bazi` / 启动回显）、`calendar_app/version.py`、`tools/dev_checks/verify_ui.py`、`README.md`、`CHANGELOG.md`。
+
+### v1.9.2 (Build 2609300003) — 2026-09-30
+
+- **修复悬停下拉闪烁**（用户 v1.9.1 两张截图反馈）：鼠标悬停弹出生肖下拉后界面持续闪烁。
+  - **现象**：悬停 150ms 弹出下拉的瞬间，下拉层反复开关、整段顶栏闪烁不停。
+  - **根因**：`showPopup()` 打开瞬间 Qt 会给 combo 发一次**伪 Leave**，此时光标仍在 combo 自身几何内（并不在弹层窗口内）。旧 `Leave` 判定只排除「弹层窗口几何」，于是伪 Leave 被误判为「鼠标离开」→ 触发 `hidePopup()` → 弹出被关 → 重新悬停又弹，形成**开关循环 = 闪烁**。
+  - **修法**：`eventFilter` 的 `Leave` 分支收起判定改为「光标**既不在 combo 自身几何、也不在弹层窗口几何**内才 `hidePopup()`」——把光标仍在 combo 上的情形（伪 Leave）一并排除（`self.zodiac_box.geometry().contains(gp) or view.window().frameGeometry().contains(gp)`），并将 `QCursor.pos()` 提出为局部变量 `gp` 复用。
+- **修复生肖框右侧留白过多**（用户图 2 反馈）：未选生肖时「生肖」两字旁有大段空白。
+  - **修法**：生肖框宽度 `64 → 44`px（仅贴住「生肖」两字），顶栏重排：八字 `x+=50`、生肖 `x+=47`、前/后一日 `x+=29/30`、撕页 `x+=43`、今日止于 348；透明度滑块顺势右移补位 `360..434`（`setGeometry(360, y, 74, h)`），窗控按钮锚点不动。
+- **验证**：`verify_ui.py` **105/105 → 106/106**（新增「生肖框宽度 44」「闪烁修复：combo 自身几何排除」2 条断言）✓ · `ui_agenda_probe.py` **43/43** ✓ · `agenda_checks.py` **34/34** ✓ · `test_process.py` **18/18** ✓ · `font_weight_probe.py` **5/5** ✓ · `geom_probe.py` 通过 ✓。
+- **改动文件**：`ui/page.py`（`eventFilter` 伪 Leave 排除 + `_build_controls` 顶栏几何）、`calendar_app/version.py`、`tools/dev_checks/verify_ui.py`、`README.md`、`CHANGELOG.md`。
+
+### v1.9.1 (Build 2609300002) — 2026-09-30
+
+- **修复生肖框与下拉弹层 UI**（用户 v1.9.0 两张截图反馈）：
+  - **① 未选时显示「生肖」两字**：v1.9.0 的「生肖 ⋯」占位项被用户否定 —— 改为 Qt6 **占位文本**方案：删除占位列表项，`setPlaceholderText("生肖")` + `setCurrentIndex(-1)`，**下拉列表仅含 12 生肖**（不再有「生肖……」占位行）；`currentData()` 未选时仍为 `None`，选人逻辑零改动。
+  - **② 红色箭头块移除**：v1.9.0 用 QSS 边框画的 `::down-arrow` 三角在真机上渲染成红色色块。现彻底隐藏（`::drop-down` 宽 0 + `::down-arrow` 尺寸 0），交互改由**悬停弹出**承担。
+  - **③ 悬停即弹出下拉**：`zodiac_box` 挂 `eventFilter` —— `Enter` 启动 **150ms 停留计时**（防扫过顶栏误弹）后 `showPopup()`；`Leave` 停表，若弹层可见且**鼠标不在弹层窗口内**（允许 combo→弹层间隙）则 `hidePopup()`。
+  - **④ 弹层滚轴随红绿主题**：`QAbstractItemView::item` 行高 22px + 内边距；`QScrollBar:vertical` 窄滚轴（宽 10px、圆角、淡底）、**把手取主题 `main` 色**（hover 加深为 `dark`）、上下按钮隐藏、页槽淡墨；选中行仍为主题 `main` 底 + 白字。
+- **验证**：占位文本渲染探针（未选 72 墨迹 px / 选中 44 px / 复位恢复）通过；`verify_ui.py` **101/101 → 105/105**（新增占位文本、悬停弹出、离开收起、滚轴主题化、箭头移除 5 条断言）✓ · `ui_agenda_probe.py` **43/43** ✓ · `agenda_checks.py` **34/34** ✓ · `test_process.py` **18/18** ✓ · `font_weight_probe.py` **5/5** ✓ · `geom_probe.py` 通过 ✓。
+- **改动文件**：`ui/page.py`（占位文本 / `eventFilter` / `_open_zodiac_popup` / `_zx_hover_timer` / `_theme_controls` 弹层 QSS）、`calendar_app/version.py`、`tools/dev_checks/verify_ui.py`、`README.md`、`CHANGELOG.md`。
+
+### v1.9.0 (Build 2609300001) — 2026-09-30
+
+- **修复建议卡（事业 / 感情 / 出行 / 财务）显示不全**（用户图 1 反馈）：卡内文字折行后仍会被截断，鼠标**悬停停留**后弹出完整建议。
+  - **现象**：四张建议卡片正文较长时，第二行 `elidedText` 省略号截断，用户看不到完整内容。
+  - **根因**：卡片是 `CalendarPage` 自绘控件上的静态绘制，没有「查看全文」的交互入口。
+  - **修法**：新增 `_advice_rects()`（与 `_paint_advice` 完全一致的几何），在 `mouseMoveEvent` 中命中卡片并启动 **350ms 停留计时器**（`_dwell_timer`），停留后才调用 `QToolTip.showText()` 把 `info["advice"][key]` 完整内容锚定到卡片下方显示；移出卡片或离开窗口立即收起并复位状态；悬停时给手型光标提示可交互。
+  - ⚠ PySide6 无 `QToolTip.setStyleSheet`：tooltip 配色只能靠**应用级样式表**着色，故在 `_theme_controls()` 里 `QApplication.instance().setStyleSheet("QToolTip{...}")`，背景取 `box_bg`、文字取 `dark`、边框取 `main` —— **随红/绿主题一致**。
+- **修复未选生肖时下拉框外观**（用户图 2 反馈）：未选时显示「生肖 ⋯」，下拉弹层样式与整体风格一致且随日期红绿变色。
+  - **现象**：旧默认项只写「生肖…」，下拉弹层用静态色（`#faf8f0` 底 / `#eeeeee` 选中），与红绿主题脱节。
+  - **修法**：默认项改为「生肖 ⋯」（三个点即下拉按钮的视觉提示）；`QComboBox` QSS 增加 `hover` 态、`::down-arrow` 主题色箭头，弹层 `QAbstractItemView` 用主题变量填充（`background:%s`+`box_bg`、`selection-background-color:%s`+`main`、`selection-color:#ffffff`），随红/绿切换。
+- **新增 `[12]` 组 11 条断言**（`verify_ui.py` **90/90 → 101/101**）：建议卡几何方法存在且返回 4 张卡、几何与绘制一致、落在页内不压底部、hover 接住 + dwell 计时 + 真正 `showText` + 手型光标 + 离开收起；生肖框默认文本「生肖 ⋯」、tooltip 全局配色含主题变量、下拉弹层主题化。
+- **验证**：`verify_ui.py` **101/101** ✓ · `ui_agenda_probe.py` **43/43** ✓ · `agenda_checks.py` **34/34** ✓ · `test_process.py` **18/18** ✓ · `font_weight_probe.py` **5/5** ✓ · `geom_probe.py` 通过 ✓。
+- **改动文件**：`ui/page.py`（`_advice_rects` / `_show_advice_tip` / `mouseMoveEvent` / `leaveEvent` / `_build_controls` 默认项 / `_theme_controls` tooltip+弹层 QSS）、`calendar_app/version.py`、`tools/dev_checks/verify_ui.py`、`README.md`、`CHANGELOG.md`。
+
+### v1.8.9 (Build 2609290001) — 2026-09-29
+
+- **新增「今日成语」**（用户红框标注需求）：年份行与巨大数字之间的居中空带，按当日分数显示对应成语。
+  - **分数口径**：**优先本日生肖分数**（页顶已选生肖时的 `zodiac_report["score"]`，如「三合火局（80分）」）；**未选生肖则用本日分数**（`fortune_score`，如「68分」）。
+  - **十段映射**：0–9 否极泰来 · 10–19 绝处逢生 · 20–29 转危为安 · 30–39 化险为夷 · 40–49 逢凶化吉 · 50–59 时来运转 · 60–69 渐入佳境 · 70–79 万事顺遂 · 80–89 吉星高照 · 90–100 圆满无缺（`idx = min(score,100)//10` 封顶 9）。
+  - **字体**：同箴 / 谶标题 —— 华文中宋（`ZH_FONT`）`QFont.Black` 24px；**颜色随主题红绿**（取调色板 `dark`）。
+  - **几何**：`IDIOM_RECT = (150, 103, 220, 30)`，`AlignCenter` 居中于页中线。巨大数字 168px 的墨迹顶约 y=144，本带下沿 133，不相压；左「丙午年·马」墨迹止于 ~114、右「节气」起于 ~369，均不冲突。
+- **新增 `[11]` 组 8 条断言**（`verify_ui.py` **82/82 → 90/90**）：
+  - 分数段映射 **23 个边界值**（每段首尾 + 100 封顶）全对；
+  - 源码断言：生肖分优先口径、字体 `ZH_FONT`+`Black`、颜色 `QPen(dark)`、`IDIOM_RECT` 居中绘制；
+  - **真实渲染**：红 / 绿两日成语带内均有墨迹（n>200）、bbox 中心在页中线 260±12、墨迹留在 y 98–138 带内不压巨大数字。
+- **实测**：红日（44 分）→「逢凶化吉」、绿日（62 分）→「渐入佳境」，均居中显示、随主题变色。
+- **验证**：`verify_ui.py` **90/90** ✓ · `ui_agenda_probe.py` **43/43** ✓ · `agenda_checks.py` **34/34** ✓ · `test_process.py` **18/18** ✓ · `font_weight_probe.py` **5/5** ✓ · `geom_probe.py` 通过 ✓ · pyflakes 零输出 ✓。
+- **改动文件**：`ui/page.py`（`IDIOM_RECT` / `IDIOM_BY_BAND` / `idiom_for_score()` / `_paint_header` 绘制）、`calendar_app/version.py`、`tools/dev_checks/verify_ui.py`、`README.md`、`CHANGELOG.md`。
+
 ### v1.8.8 (Build 2609280029) — 2026-09-28
 
 - **目录整理**（用户要求「整理目录下的临时文件和缓存文件」）：

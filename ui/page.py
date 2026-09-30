@@ -3,25 +3,37 @@
 import os
 from datetime import date, datetime
 
-from PySide6.QtCore import QPoint, QRect, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import (QBrush, QColor, QFont, QFontMetricsF, QLinearGradient,
-                           QPainter, QPen)
-from PySide6.QtWidgets import QComboBox, QPushButton, QSlider, QWidget
+from PySide6.QtCore import QPoint, QRect, QRectF, Qt, QEvent, QTimer, Signal
+from PySide6.QtGui import (QBrush, QColor, QCursor, QFont, QFontMetricsF,
+                           QLinearGradient, QPainter, QPen)
+from PySide6.QtWidgets import (QApplication, QComboBox, QPushButton, QSlider,
+                               QWidget, QToolTip)
 
 from calendar_app import fonts as calendar_app_fonts
-from calendar_app.engine import get_day_info, SHENGXIAO_LIST
+from calendar_app.engine import (get_day_info, SHENGXIAO_LIST, SHENGXIAO_2CHAR,
+                                 ANIMAL_TO_2CHAR)
 from calendar_app import version as VER
 
 from ui.theme import (COLOR_CHIPS, _font, _lf_asset, _painter_shear, _paper_pixmap,
                       _pix_cached, _pix_scaled, _tone_of, palette_for,
                       use_builtin_fonts, EN_FONT, IMG_BAGUA, INK, NUM_FONT,
-                      PAPER_EDGE, SHEAR, ZH_FONT, ZH_SONG, ZH_WISDOM, _ZODIAC_DIR)
+                      SHEAR, ZH_FONT, ZH_SONG, ZH_WISDOM, _ZODIAC_DIR)
 
 
 class CalendarPage(QWidget):
     """纸质撕页日历页面（全部自绘 + 内嵌功能按钮）。"""
 
-    PAGE_W, PAGE_H = 520, 848
+    # v1.9.9：页高 848 → 838 —— 收紧「（双击按钮 打开/关闭 对应面板）」提示行以下的页底留白
+    # （原为 22px 空纸 + 4px 布局间距 + 2px 面板内缩 ⇒ 提示行到行事历面板约 28px 空白，
+    #  用户反馈「留白过大」）。边框下沿自此改用**绝对坐标**（不再由 PAGE_H 推导），
+    # 缩短页高时外框不会被带着一起上移。
+    # v1.9.10：838 → 841 —— 底部四按钮距外框改 5px（原 2px），提示行与下方
+    # 「本月/本日行事历」面板随页高同步下移 3px（用户反馈「关于本软件 等四个按钮
+    # 距离外框改为 5px 间距，对应的（双击按钮 打开/关闭 对应面板）和 本月和本日
+    # 行事历也同步下移」）。
+    PAGE_W, PAGE_H = 520, 841
+    FRAME_OUT_BOTTOM = 789        # 外框下沿（3px 粗线）
+    FRAME_IN_BOTTOM = 783         # 内框下沿（1px 细线）；版权行框底(778) 下 5px，不再压字
     CENTER_DATE_RECT = QRect(56, 108, 404, 192)   # 巨大日期命中区（按 10 次触发祭拜三清）
     TITLE_RECT = QRect(24, 20, 84, 32)            # 「农历日历」标题行：按住拖动窗口
     # 巨大日期数字：主字 / 印影两个绘制框（龙·凤水印与高光均以 NUM_RECT 为基准）
@@ -51,9 +63,17 @@ class CalendarPage(QWidget):
     SHEEN_RECT = QRect(58, 100, 408, 208)   # 仅刷新数字所在区域，避免整页重绘
     # 龙凤水平贴边：龙墨迹左缘 / 凤墨迹右缘 = 中线 ± LF_INSET（实测 186 时恰顶住数字）
     LF_INSET = 186
-    # 底部双击按钮：分别开关 本月 / 本日 行事历面板
+    # 底部双击按钮：分别开关 本月 / 本日 行事历面板（位于外框之下 = 框外条）
     TAB_W, TAB_H = 105, 26
-    TAB_Y = PAGE_H - 40
+    # v1.9.9：外框下沿改为绝对 789（内框 783），版权行框底(778) 到内框恰好 5px 间隔、
+    # 不再与框线重叠（用户反馈「版权信息 和 边框 之间间隔也是 5px 避免重叠」）；
+    # v1.9.10：793 → 796 —— 外框线（3px 笔宽，实测占 787..790）到按钮上沿线
+    # 的空白由 2px 调至 5px（用户反馈「四个按钮距离外框改为 5px 间距」）。
+    TAB_Y = 796
+    # 版权行 y（文字 16px 槽顶）：出行/财务 建议卡底线(760) 下 5px。
+    # v1.9.8 从 781 退回 762 —— 用户反馈版权行离 出行/财务 太远（应 5px），
+    # 由「外框上移」而非「版权行下移」达成底部紧凑。
+    COPYRIGHT_Y = 762
     TAB_MONTH_RECT = QRect(148, TAB_Y, TAB_W, TAB_H)
     TAB_DAY_RECT = QRect(267, TAB_Y, TAB_W, TAB_H)
 
@@ -71,6 +91,23 @@ class CalendarPage(QWidget):
         self._day_visible = True
         self._date_press_count = 0
         self._win_drag = None    # 标题行拖动窗口用的偏移
+        self._hover_advice_key = None   # 当前悬停的建议卡（事业/感情/出行/财务）
+        self._hover_advice_rect = None  # 该卡几何，供 tooltip 锚定
+        self._dwell_timer = QTimer(self)        # 悬停停留后才弹完整建议
+        self._dwell_timer.setInterval(350)
+        self._dwell_timer.setSingleShot(True)
+        self._dwell_timer.timeout.connect(self._show_advice_tip)
+        # 生肖框悬停弹层：150ms 停留（防止扫过顶栏时误弹）
+        self._zx_hover_timer = QTimer(self)
+        self._zx_hover_timer.setInterval(150)
+        self._zx_hover_timer.setSingleShot(True)
+        self._zx_hover_timer.timeout.connect(self._open_zodiac_popup)
+        # 鼠标选完生肖后短暂抑制自动重弹（否则选完关闭又因悬停立即再弹）
+        self._zx_just_selected = False
+        self._zx_select_guard = QTimer(self)
+        self._zx_select_guard.setSingleShot(True)
+        self._zx_select_guard.setInterval(600)
+        self._zx_select_guard.timeout.connect(self._zx_clear_selected_guard)
         self.setMouseTracking(True)   # 无按键也接收 mouseMove，用于底部手型光标
         self._build_controls()
         # 页顶时钟：定时刷新当前时分
@@ -97,9 +134,29 @@ class CalendarPage(QWidget):
     # ---------- 内嵌控件 ----------
     def _build_controls(self):
         self.zodiac_box = QComboBox(self)
-        self.zodiac_box.addItem("生肖…", None)
-        for s in SHENGXIAO_LIST:
-            self.zodiac_box.addItem(s, s)
+        # 未选生肖：只显示「生肖」两字（Qt6 占位文本，currentIndex=-1），
+        # 下拉列表仅含 12 生肖；悬停即弹出（eventFilter），弹层滚轴随主题。
+        # v1.9.5：下拉框显示「两字生肖」（子鼠…亥猪），但 data 仍存单字，
+        # 以兼容 _sync_zodiac_from_bazi 的 findData(单字生肖) 联动逻辑。
+        for animal, two in zip(SHENGXIAO_LIST, SHENGXIAO_2CHAR):
+            self.zodiac_box.addItem(two, animal)
+        self.zodiac_box.setPlaceholderText("生肖")
+        self.zodiac_box.setCurrentIndex(-1)
+        # v1.9.6：选中显示「加大 + 居中」。Qt 的 QComboBox 非可编辑态
+        # 显示文字无法用 QSS 对齐，改用内置惯用法：可编辑 + 只读 + 行编辑
+        # 居中（NoFocus 防文本光标，NoInsert 防键盘输入污染列表）。
+        self.zodiac_box.setEditable(True)
+        _le = self.zodiac_box.lineEdit()
+        _le.setReadOnly(True)
+        _le.setAlignment(Qt.AlignCenter)
+        _le.setFocusPolicy(Qt.NoFocus)
+        _le.setTextMargins(0, 0, 0, 0)
+        # ⚠ 可编辑态下 QComboBox 的占位文本不会自动落到行编辑上，
+        # 必须直接设在 QLineEdit（只读行编辑同样渲染 placeholder）。
+        _le.setPlaceholderText("生肖")
+        self.zodiac_box.setInsertPolicy(QComboBox.NoInsert)
+        self.zodiac_box.installEventFilter(self)
+        self.zodiac_box.activated.connect(self._zx_on_activated)
 
         def btn(text, tip="", width=0):
             b = QPushButton(text, self)
@@ -127,12 +184,12 @@ class CalendarPage(QWidget):
         y, h = 26, 24
         x = 110
         self.btn_bazi.setGeometry(x, y, 46, h); x += 50      # 八字：文字完整
-        self.zodiac_box.setGeometry(x, y, 64, h); x += 68    # 生肖：容下「生肖…」
+        self.zodiac_box.setGeometry(x, y, 46, h); x += 49    # 生肖：与八字等宽（v1.9.3）
         self.btn_prev.setGeometry(x, y, 26, h); x += 29
         self.btn_next.setGeometry(x, y, 26, h); x += 30
         self.btn_tear.setGeometry(x, y, 40, h); x += 43
-        self.btn_today.setGeometry(x, y, 40, h)              # 今日止于 370
-        self.opacity_slider.setGeometry(373, y, 61, h)       # 透明度滑块 373..434
+        self.btn_today.setGeometry(x, y, 40, h)              # 今日止于 351
+        self.opacity_slider.setGeometry(360, y, 74, h)       # 透明度滑块 360..434
         self.btn_min.setGeometry(436, y, 24, h)
         self.btn_close.setGeometry(464, y, 24, h)
         # 底部一行：四按钮平均分布（关于本软件 置于左侧）
@@ -140,9 +197,38 @@ class CalendarPage(QWidget):
         self.btn_import.setGeometry(386, self.TAB_Y, 105, self.TAB_H)
         self._theme_controls()
 
+    def _apply_zodiac_fonts(self):
+        """给生肖框 / 行编辑 / 下拉视图显式设置 QFont（v1.9.7 生肖不显示的根修）。
+
+        ⚠ 不能依赖 QSS 的 `font-family`：Qt 解析 QSS 时会把多词族名归一化
+        （'Noto Sans SC' → 'NotoSansSC'），真机上匹配不到内置族，字形整列不显示。
+        改用与全页自绘文字同一条 `setFamilies` 路径（内置黑体优先），字号 12px
+        与紧邻的「八字」按钮一致。可重复调用（每次重设主题后重设字体，幂等）。
+        """
+        f = QFont()
+        f.setFamilies(calendar_app_fonts.sans_families())
+        f.setPixelSize(12)
+        self.zodiac_box.setFont(f)
+        le = self.zodiac_box.lineEdit()
+        if le is not None:
+            le.setFont(f)
+        vw = self.zodiac_box.view()
+        if vw is not None:
+            vw.setFont(f)
+            # v1.9.8 根修「下拉整列 …」：QComboBox 弹层宽度**默认 = combo 宽度(46px)**，
+            # 扣掉滚轴(10px)+内边距后文本可用宽仅 ~20px，两字生肖(~24px) 被 delegate
+            # elide 成「…」——**与字体无关**（顶栏当前项能正常显示即是佐证）。
+            # 显式把弹层撑到最宽条目 + 44px，保证「子鼠…亥猪」完整显示。
+            fm = QFontMetricsF(f)
+            _w = 0
+            for i in range(self.zodiac_box.count()):
+                _w = max(_w, fm.horizontalAdvance(self.zodiac_box.itemText(i)))
+            vw.setMinimumWidth(int(_w) + 44)
+
     def _theme_controls(self):
         p = palette_for(self.info)
         main, dark = p["main"].name(), p["dark"].name()
+        box_bg = p["box_bg"].name()
         style = (
             "QPushButton{background:rgba(255,255,255,0);color:%s;"
             "border:1px solid %s;border-radius:3px;padding:1px 6px;"
@@ -160,14 +246,41 @@ class CalendarPage(QWidget):
             "font-size:12px;font-family:%s;}"
             "QPushButton:hover{background:%s;color:#fff;}"
             % (main, main, calendar_app_fonts.sans_css(), main))
+        # v1.9.7：生肖框字号/字体改由显式 QFont（setFamilies + setPixelSize）控制，
+        # 不再依赖 QSS 的 font-family —— Qt 对 QSS 多词族名（'Noto Serif/Sans SC'）
+        # 会做归一化，真机上匹配不到内置族 → v1.9.6「生肖整列/选中彻底不显示」。
+        # 改走与全页自绘文字相同的 setFamilies 路径（内置黑体优先、系统字体兜底），
+        # 字号降到 12px 与紧邻的「八字」按钮同级，兄弟控件视觉一致。
         self.zodiac_box.setStyleSheet(
             "QComboBox{background:rgba(255,255,255,0);color:%s;"
-            "border:1px solid %s;border-radius:3px;padding:1px 6px;"
-            "font-size:12px;font-family:%s;}"
-            "QComboBox::drop-down{border:none;width:14px;}"
-            "QComboBox QAbstractItemView{background:#faf8f0;color:%s;"
-            "border:1px solid %s;selection-background-color:#eeeeee;}"
-            % (dark, main, calendar_app_fonts.sans_css(), dark, main))
+            "border:1px solid %s;border-radius:3px;padding:1px 2px;}"
+            "QComboBox QLineEdit{background:rgba(255,255,255,0);color:%s;"
+            "border:none;}"
+            "QComboBox:hover{background:rgba(0,0,0,0.04);}"
+            "QComboBox::drop-down{border:none;width:0;}"
+            "QComboBox::down-arrow{width:0;height:0;border:none;image:none;}"
+            "QComboBox QAbstractItemView{background:%s;color:%s;"
+            "border:1px solid %s;selection-background-color:%s;"
+            "selection-color:#ffffff;outline:0;}"
+            "QComboBox QAbstractItemView::item{min-height:22px;padding:2px 8px;}"
+            "QComboBox QAbstractItemView QScrollBar:vertical{background:rgba(0,0,0,0.05);"
+            "width:10px;margin:2px;border-radius:5px;}"
+            "QComboBox QAbstractItemView QScrollBar::handle:vertical{background:%s;"
+            "min-height:24px;border-radius:5px;}"
+            "QComboBox QAbstractItemView QScrollBar::handle:vertical:hover{background:%s;}"
+            "QComboBox QAbstractItemView QScrollBar::add-line:vertical,"
+            "QComboBox QAbstractItemView QScrollBar::sub-line:vertical{height:0;width:0;}"
+            "QComboBox QAbstractItemView QScrollBar::add-page:vertical,"
+            "QComboBox QAbstractItemView QScrollBar::sub-page:vertical{background:rgba(0,0,0,0.06);}"
+            % (dark, main, dark, box_bg, dark, main, main, main, dark))
+        self._apply_zodiac_fonts()
+        # 全局 tooltip 配色随主题红/绿（建议卡完整内容 + 各按钮说明一致）。
+        # ⚠ PySide6 无 QToolTip.setStyleSheet；tooltip 只能靠应用级样式表着色。
+        QApplication.instance().setStyleSheet(
+            "QToolTip{background:%s;color:%s;border:1px solid %s;"
+            "border-radius:5px;padding:7px 9px;font-size:13px;"
+            "font-family:%s;}"
+            % (box_bg, dark, main, calendar_app_fonts.sans_css()))
         self.opacity_slider.setStyleSheet(
             "QSlider{background:rgba(255,255,255,0);}"
             "QSlider::groove:horizontal{border:1px solid %s;height:4px;"
@@ -230,10 +343,27 @@ class CalendarPage(QWidget):
             w.move(ev.globalPosition().toPoint() - self._win_drag)
             return
         pos = ev.position()
-        hand = (self.TAB_MONTH_RECT.contains(int(pos.x()), int(pos.y())) or
-                self.TAB_DAY_RECT.contains(int(pos.x()), int(pos.y())) or
-                self.CENTER_DATE_RECT.contains(int(pos.x()), int(pos.y())) or
-                self.TITLE_RECT.contains(int(pos.x()), int(pos.y())))
+        hx, hy = int(pos.x()), int(pos.y())
+        # 事业/感情/出行/财务 卡片：悬停停留后弹出完整建议（解决卡内文字被截断）
+        hit_key = None
+        for k, r in self._advice_rects():
+            if r.contains(hx, hy):
+                hit_key = k
+                break
+        if hit_key != self._hover_advice_key:
+            self._hover_advice_key = hit_key
+            QToolTip.hideText()              # 切换卡片立即收起旧提示
+            if hit_key:
+                self._hover_advice_rect = next(
+                    r for k, r in self._advice_rects() if k == hit_key)
+                self._dwell_timer.start()    # 停留 350ms 后再显示完整内容
+            else:
+                self._dwell_timer.stop()
+        hand = (self.TAB_MONTH_RECT.contains(hx, hy) or
+                self.TAB_DAY_RECT.contains(hx, hy) or
+                self.CENTER_DATE_RECT.contains(hx, hy) or
+                self.TITLE_RECT.contains(hx, hy) or
+                hit_key is not None)         # 卡片也给出手型光标，提示可悬停
         self.setCursor(Qt.PointingHandCursor if hand else Qt.ArrowCursor)
         super().mouseMoveEvent(ev)
 
@@ -242,8 +372,46 @@ class CalendarPage(QWidget):
         super().mouseReleaseEvent(ev)
 
     def leaveEvent(self, ev):
+        self._hover_advice_key = None
+        self._dwell_timer.stop()
+        QToolTip.hideText()
         self.unsetCursor()
         super().leaveEvent(ev)
+
+    # ---------- 生肖下拉：悬停即弹出（v1.9.1，v1.9.3 根修闪烁） ----------
+    def eventFilter(self, obj, ev):
+        """生肖框悬停 150ms 弹出下拉；光标真正离开 combo 与弹层二者才收起。"""
+        if obj is self.zodiac_box:
+            if ev.type() == QEvent.Enter:
+                self._zx_hover_timer.start()
+            elif ev.type() == QEvent.Leave:
+                self._zx_hover_timer.stop()
+                view = self.zodiac_box.view()
+                if view.isVisible():
+                    # 收起判定必须在同一坐标系：geometry() 是父坐标、QCursor.pos()
+                    # 是全局坐标，直接 contains 恒为 False → 伪 Leave 仍误收起 →
+                    # 闪烁（v1.9.2 未修好的根因）。必须 mapToGlobal 映射后再比较。
+                    gp = QCursor.pos()
+                    combo_rect = QRect(self.zodiac_box.mapToGlobal(QPoint(0, 0)),
+                                       self.zodiac_box.size())
+                    if not (combo_rect.contains(gp)
+                            or view.window().frameGeometry().contains(gp)):
+                        self.zodiac_box.hidePopup()
+        return super().eventFilter(obj, ev)
+
+    def _open_zodiac_popup(self):
+        """悬停停留后弹出生肖下拉列表（刚用鼠标选完的 600ms 内不重弹）。"""
+        if self._zx_just_selected or self.zodiac_box.view().isVisible():
+            return
+        self.zodiac_box.showPopup()
+
+    def _zx_on_activated(self, _index):
+        """鼠标/键盘选中生肖后短暂抑制悬停自动重弹。"""
+        self._zx_just_selected = True
+        self._zx_select_guard.start()
+
+    def _zx_clear_selected_guard(self):
+        self._zx_just_selected = False
 
     # ---------- 绘制 ----------
     def paintEvent(self, ev):
@@ -252,7 +420,6 @@ class CalendarPage(QWidget):
         p.setRenderHint(QPainter.Antialiasing)
         p.setRenderHint(QPainter.TextAntialiasing)
         self._paint_paper(p)
-        self._paint_stack(p)
         self._paint_border(p)
         self._paint_dragon_phoenix(p)
         self._paint_header(p)
@@ -277,26 +444,28 @@ class CalendarPage(QWidget):
         p.drawText(QRect(30, 26, 80, 24), Qt.AlignVCenter | Qt.AlignLeft,
                    VER.APP_NAME)
 
-    def _paint_stack(self, p):
-        """底部叠页，模拟一沓待撕的日历纸。"""
-        for i in range(1, 5):
-            p.setPen(QPen(PAPER_EDGE, 1))
-            p.setBrush(QColor("#f3f0e6" if i % 2 else "#eeebe0"))
-            p.drawRect(10 + i, self.PAGE_H - 28 - i * 2 - 10,
-                       self.PAGE_W - 20 - i * 2, 10 + i * 2)
+    # v1.9.9：删除 `_paint_stack`（底部「叠页」装饰）。
+    # 它在页底画 4 条自内向外收窄的 #eeebe0/#f3f0e6 矩形（y 802..820、满宽），
+    # 在框外条区域呈现为一条**浅灰横带**——用户反馈「红框部分好像有一个灰色的框，删除」。
+    # 颜色 #eeebe0=RGB(238,235,224) 与截图实测的横带色完全一致，故确认即此装饰。
 
     def _paint_border(self, p):
         main = self.P["main"]
+        # v1.9.9：外框/内框下沿改用**绝对坐标**（789 / 783），不再由 PAGE_H 推导——
+        # 这样缩短页高（848→838）收紧页底留白时，外框不会被带着一起上移。
+        # 版权行框 762..778，内框 783 = 框底 + 5px（用户反馈「版权信息和边框间隔也是
+        # 5px 避免重叠」；旧值 776 恰好压在版权行文字下缘上）；外框/内框仍相距 6px。
         p.setPen(QPen(main, 3))
         p.setBrush(Qt.NoBrush)
-        p.drawRect(14, 14, self.PAGE_W - 28, self.PAGE_H - 60)
+        p.drawRect(14, 14, self.PAGE_W - 28, self.FRAME_OUT_BOTTOM - 14)
         p.setPen(QPen(main, 1))
-        p.drawRect(21, 21, self.PAGE_W - 42, self.PAGE_H - 73)
+        p.drawRect(21, 21, self.PAGE_W - 42, self.FRAME_IN_BOTTOM - 21)
         p.setBrush(main)
         # 圆点圆心必须恰好落在外框四个顶点上（外框 14,14,~ 起画）：
         # 右缘此前写成 PAGE_W-20，偏离顶点 6px（用户 2026-09-28 反馈）
-        for cx, cy in [(14, 14), (self.PAGE_W - 14, 14), (14, self.PAGE_H - 46),
-                       (self.PAGE_W - 14, self.PAGE_H - 46)]:
+        for cx, cy in [(14, 14), (self.PAGE_W - 14, 14),
+                       (14, self.FRAME_OUT_BOTTOM),
+                       (self.PAGE_W - 14, self.FRAME_OUT_BOTTOM)]:
             p.drawEllipse(QPoint(cx, cy), 4, 4)
 
     def _paint_dragon_phoenix(self, p):
@@ -392,16 +561,44 @@ class CalendarPage(QWidget):
         # 副行：左农历干支年 / 右节气或假日
         p.setFont(_font(13, ZH_FONT))
         p.setPen(QPen(dark))
-        left = "%s年 · %s" % (info["lunar_year_cn"], info["lunar_year_shengxiao"])
+        left = "%s年 · %s" % (info["lunar_year_cn"],
+                             ANIMAL_TO_2CHAR.get(info["lunar_year_shengxiao"],
+                                                 info["lunar_year_shengxiao"]))
         right = "节气 %s" % info["jieqi"]
         if info["holiday"]:
             right = "法定假日 · %s" % info["holiday"]
         p.drawText(QRect(34, 100, 210, 18), Qt.AlignLeft | Qt.AlignVCenter, left)
         p.drawText(QRect(276, 100, 210, 18), Qt.AlignRight | Qt.AlignVCenter, right)
+        # 中：今日成语（v1.8.9）——分数取「生肖分优先，未选生肖用本日分」；
+        # 字体同箴 / 谶标题（华文中宋 Black），颜色随主题红绿（dark）。
+        rep = self.zodiac_report
+        if rep and rep.get("score") is not None:
+            score = rep["score"]
+        else:
+            score = info["fortune_score"]
+        p.setFont(_font(self.IDIOM_PX, ZH_FONT, QFont.Black))
+        p.setPen(QPen(dark))
+        p.drawText(QRect(*self.IDIOM_RECT), Qt.AlignCenter,
+                   self.idiom_for_score(score))
 
     # 箴 / 谶 竖排正文：每列最多 5 字、最多 2 列（即最多显示 10 字）
     WIS_MAX_ROWS = 5
     WIS_MAX_COLS = 2
+
+    # 中：今日成语（v1.8.9）。位置在年份行与巨大数字之间的居中空带
+    # （用户红框标注：与左「丙午年·马」/右「节气」同一视觉行、水平居中）。
+    # 巨大数字 168px 居中于 NUM_RECT(110-296)，其墨迹顶约 y=144，故本带下沿 133 安全。
+    IDIOM_RECT = (150, 103, 220, 30)
+    IDIOM_PX = 24
+    # 分数段 → 成语（十段，idx = min(score,100)//10，封顶 9）
+    IDIOM_BY_BAND = ("否极泰来", "绝处逢生", "转危为安", "化险为夷", "逢凶化吉",
+                     "时来运转", "渐入佳境", "万事顺遂", "吉星高照", "圆满无缺")
+
+    @staticmethod
+    def idiom_for_score(score):
+        """按分数取成语：0–9 否极泰来 … 90–100 圆满无缺（见 IDIOM_BY_BAND）。"""
+        idx = max(0, min(9, int(score) // 10))
+        return CalendarPage.IDIOM_BY_BAND[idx]
 
     @staticmethod
     def _wisdom_chars(text):
@@ -458,7 +655,9 @@ class CalendarPage(QWidget):
         p.setFont(_font(17, ZH_FONT, QFont.Black))
         p.setPen(QPen(dark))
         p.drawText(QRect(0, 296, self.PAGE_W, 24), Qt.AlignCenter,
-                   "%s日 · 属%s" % (info["day_ganzhi"], info["day_shengxiao"]))
+                   "%s日 · 属%s" % (info["day_ganzhi"],
+                                 ANIMAL_TO_2CHAR.get(info["day_shengxiao"],
+                                                     info["day_shengxiao"])))
 
     def _paint_sheen(self, p, text):
         """巨大数字上的斜向高光：一条 45° 亮带沿字形自左上扫向右下。
@@ -556,6 +755,12 @@ class CalendarPage(QWidget):
             cur += unit
         if cur:
             lines.append(cur)
+        # v1.9.11：修「跨行居中错位」——断行点落在「、」之后时，行尾顿号会被
+        # 计入 Qt.AlignHCenter 的居中宽度，使该行的**墨迹**整体左移约半个顿号，
+        # 与相邻行错位（用户反馈「因为最后一个、导致第二行与第一行错位」）。
+        # 换行处的行尾顿号本就多余（列表在下一行继续），故统一抹去，令每行
+        # 按自身可见文字宽度精确居中。
+        lines = [ln[:-1] if ln.endswith("、") else ln for ln in lines]
         return lines
 
     @staticmethod
@@ -577,59 +782,59 @@ class CalendarPage(QWidget):
             return
         step = min(fm.height(), rect.height() / float(len(lines)))
         for i, ln in enumerate(lines):
+            # v1.9.10：宜 / 忌 内容改为**水平居中**（用户反馈「宜 和 忌 的内容保持居中」）。
+            # _draw_para 目前仅用于宜/忌两处，故在此统一居中，无需额外参数。
             p.drawText(QRectF(rect.left(), rect.top() + i * step,
                               rect.width(), step),
-                       Qt.AlignLeft | Qt.AlignVCenter | Qt.TextDontClip, ln)
+                       Qt.AlignHCenter | Qt.AlignVCenter | Qt.TextDontClip, ln)
 
     def _paint_yiji(self, p):
         info = self.info
         main, dark = self.P["main"], self.P["dark"]
-        y, h = 384, 96
-        # 宜框（30..180 与上方「十七日」框对齐）
+        y, h = 384, 95
+        # 宜框 / 忌框：窄 150 双栏，中缝放神位信息（v1.9.3 版式回退，v1.9.5）
         p.setPen(QPen(main, 2))
         p.setBrush(self.P["box_bg"])
         p.drawRect(30, y, 150, h)
-        p.setBrush(main)
-        p.drawEllipse(90, y + 6, 30, 30)          # 圈内水平居中
-        p.setFont(_font(18, ZH_FONT, QFont.Black))
-        p.setPen(QPen(QColor("#ffffff")))
-        p.drawText(QRect(90, y + 6, 30, 30), Qt.AlignCenter, "宜")
-        p.setFont(_font(14, ZH_FONT, QFont.DemiBold))
-        p.setPen(QPen(dark))
-        # 文字区 y+40..y+94（宜/忌圆圈底 y+36 之下、方框底 y+96 之上），
-        # 最多 3 行 —— 行距由 _draw_para 按实际行数自适应，不再被字体行距撑破
-        self._draw_para(p, "、".join(info["yi"][:6]) or "—",
-                        QRect(38, y + 40, 140, 54), 3)
-        # 忌框（340..490 与上方「星期日」框对齐）
-        p.setBrush(self.P["box_bg"])
         p.drawRect(340, y, 150, h)
-        p.setBrush(main)
-        p.drawEllipse(400, y + 6, 30, 30)         # 圈内水平居中
-        p.setFont(_font(18, ZH_FONT, QFont.Black))
-        p.setPen(QPen(QColor("#ffffff")))
-        p.drawText(QRect(400, y + 6, 30, 30), Qt.AlignCenter, "忌")
-        p.setFont(_font(14, ZH_FONT, QFont.DemiBold))
-        p.setPen(QPen(dark))
-        self._draw_para(p, "、".join(info["ji"][:6]) or "—",
-                        QRect(348, y + 40, 140, 54), 3)
-        p.setFont(_font(14, ZH_FONT))
-        p.setPen(QPen(dark))
-        # 中栏底部：八卦水印（40% 透明，先绘于文字之下）
-        bsrc = _pix_cached(IMG_BAGUA)
-        if not bsrc.isNull():
-            bw = 92
-            bh = int(bsrc.height() * bw / bsrc.width())
-            p.save()
-            p.setOpacity(0.4)
-            p.drawPixmap(260 - bw // 2, y + h - bh, bw, bh,
-                         _pix_scaled(IMG_BAGUA, bw, bh))
-            p.restore()
+        for cx, label, key in ((105, "宜", "yi"), (415, "忌", "ji")):
+            p.setBrush(main)
+            p.drawEllipse(cx - 15, y + 6, 30, 30)           # 圈内水平居中
+            p.setFont(_font(18, ZH_FONT, QFont.Black))
+            p.setPen(QPen(QColor("#ffffff")))
+            p.drawText(QRect(cx - 15, y + 6, 30, 30), Qt.AlignCenter, label)
+            p.setFont(_font(14, ZH_FONT, QFont.DemiBold))
+            p.setPen(QPen(dark))
+            # 窄 150px 下最多 3 行容纳六宜/六忌（如 2026-01-06 共 23 字），
+            # 超出由 _draw_para 末行 elide 兜底（v1.9.5）
+            self._draw_para(p, "、".join(info[key][:6]) or "—",
+                            QRect(cx - 70, y + 38, 140, 54), 3)
+        # 神位信息：宜/忌框之间的中缝（x=186..336）竖排 5 行（v1.9.3 版式回退）
         rows = ["喜神 %s" % info["pos_xi"], "财神 %s" % info["pos_cai"],
                 "福神 %s" % info["pos_fu"], "冲煞 %s" % info["chong"],
                 "%s" % info["lu"]]
-        # 中栏文字区：左 184 / 右 336（宜框右缘 180 与忌框左缘 340 之间），
-        # 高 90（上下各留 3px）——等分 5 行即 18px/行，14px 字宽最宽 134px 可容
-        self._draw_rows(p, rows, QRect(184, y + 3, 152, h - 6))
+        # v1.9.8：中缝叠加八卦水印，透明度 40% → 20%（用户反馈「八卦透明度改到20%」），
+        # 加大（110）与竖向居中沿用 v1.9.7；20% 下更淡、不抢神位文字。
+        seam_x, seam_w = 186, 150
+        _bagua = _pix_cached(IMG_BAGUA)
+        if not _bagua.isNull():
+            wm_h = 110
+            wm_w = min(int(_bagua.width() * wm_h / _bagua.height()), seam_w - 4)
+            wx = seam_x + (seam_w - wm_w) // 2
+            wy = y + (h - wm_h) // 2
+            p.save()
+            p.setOpacity(0.2)
+            p.drawPixmap(wx, wy, wm_w, wm_h, _pix_scaled(IMG_BAGUA, wm_w, wm_h))
+            p.restore()
+        # v1.9.7：五行神位文字（喜神/财神/福神/冲煞/禄）加大加粗（11px→13px Bold），
+        # 方向信息更醒目（用户反馈「方向的字体加大加粗」）；仍水平居中于中缝。
+        p.setFont(_font(13, ZH_FONT, QFont.Bold))
+        p.setPen(QPen(dark))
+        row_h = 18
+        for i, txt in enumerate(rows):
+            el = p.fontMetrics().elidedText(txt, Qt.ElideRight, seam_w - 6)
+            p.drawText(QRect(seam_x, y + 4 + i * row_h, seam_w, row_h),
+                       Qt.AlignHCenter | Qt.AlignVCenter | Qt.TextDontClip, el)
 
     def _paint_fortune(self, p):
         info = self.info
@@ -646,12 +851,18 @@ class CalendarPage(QWidget):
         p.drawText(QRect(94, y - 2, 84, 28), Qt.AlignLeft | Qt.AlignVCenter,
                    "%d 分" % info["fortune_score"])
         # 本日生肖紧跟分数之后（吉/平/凶框保持方正不动）
+        # 已录入八字时细化为「本日运势」（八字推演口径，v1.9.3）
         rep = self.zodiac_report
         p.setFont(_font(14, ZH_FONT, QFont.Black))
         p.setPen(QPen(dark))
         if rep:
-            ztxt = "本日生肖 %s：%s（%d分）" % (
-                rep.get("name") or "", " · ".join(rep["tags"]), rep["score"])
+            label = "本日运势" if rep.get("bazi_text") else "本日生肖"
+            # v1.9.5：生肖名统一两字显示（子鼠…亥猪）
+            zname = ANIMAL_TO_2CHAR.get(rep.get("name") or "",
+                                        rep.get("name") or "")
+            ztxt = "%s %s：%s（%d分）" % (
+                label, zname,
+                " · ".join(rep["tags"]), rep["score"])
         else:
             ztxt = "在页顶选择你的生肖，查看本日运势 →"
         p.drawText(QRect(182, y + 2, 280, 22), Qt.AlignLeft | Qt.AlignVCenter, ztxt)
@@ -671,7 +882,10 @@ class CalendarPage(QWidget):
             return    # 未选生肖：提示语已移至分数旁
         p.setPen(QPen(main, 1, Qt.DashLine))
         p.drawLine(30, y - 3, self.PAGE_W - 30, y - 3)
-        p.setFont(_font(12, ZH_SONG))
+        # v1.9.10：八字推演行加粗（用户反馈「八字推演 字体加粗」）。
+        # 内置 Noto Serif SC 带真实 Bold 面，直接用 QFont.Bold（不用 setItalic，
+        # 否则会吞掉字重轴，见 theme._font 注释）。
+        p.setFont(_font(12, ZH_SONG, QFont.Bold))
         p.setPen(QPen(INK))
         # 有八字推演时优先展示（标注「八字推演」），否则显示生肖提示
         if rep.get("bazi_text"):
@@ -687,10 +901,10 @@ class CalendarPage(QWidget):
         info = self.info
         main, dark = self.P["main"], self.P["dark"]
         y, h = 574, 68
-        # 左框：吉时（与右框沿页面中线 x=260 对称）
+        # 左框：吉时（与右框沿页面中线 x=260 对称）；左右栏间距收窄到 5px（v1.9.5）
         p.setPen(QPen(main, 2))
         p.setBrush(self.P["box_bg"])
-        p.drawRect(30, y, 224, h)
+        p.drawRect(30, y, 227, h)
         p.setBrush(main)
         p.drawRoundedRect(38, y - 9, 46, 19, 2, 2)
         p.setFont(_font(12, ZH_FONT, QFont.Black))
@@ -710,10 +924,10 @@ class CalendarPage(QWidget):
         else:
             p.drawText(QRect(38, y + 22, 208, 20), Qt.AlignLeft | Qt.AlignVCenter,
                        "今日无黄道吉时")
-        # 右框：吉凶颜色（266..490，与左框对称）
+        # 右框：吉凶颜色（262..490，与左框对称，栏间距 5px，v1.9.5）
         p.setPen(QPen(main, 2))
         p.setBrush(self.P["box_bg"])
-        p.drawRect(266, y, 224, h)
+        p.drawRect(262, y, 228, h)
         p.setBrush(main)
         p.drawRoundedRect(274, y - 9, 46, 19, 2, 2)
         p.setFont(_font(12, ZH_FONT, QFont.Black))
@@ -735,16 +949,40 @@ class CalendarPage(QWidget):
             p.drawText(QRect(298, ry, 180, 17), Qt.AlignLeft | Qt.AlignVCenter,
                        "%s %s" % (tag, names))
 
+    def _advice_rects(self):
+        """事业/感情/出行/财务 四张卡片的几何（与 _paint_advice 完全一致）。
+
+        既用于绘制，也供 mouseMoveEvent 命中判定（悬停停留弹完整建议）。
+        """
+        y, cell_h, cell_w, gap = 647, 54, 227, 5
+        rects = []
+        for i, key in enumerate(["事业", "感情", "出行", "财务"]):
+            col, row = i % 2, i // 2
+            x = 30 + col * (cell_w + gap)
+            cy = y + row * (cell_h + 5)
+            rects.append((key, QRect(x, cy, cell_w, cell_h)))
+        return rects
+
+    def _show_advice_tip(self):
+        """悬停停留后，把当前卡片的完整建议以 tooltip 形式展示（卡内截断不限）。"""
+        if not self._hover_advice_key or not self._hover_advice_rect:
+            return
+        full = self.info["advice"].get(self._hover_advice_key, "")
+        if not full:
+            return
+        # 锚定到卡片矩形下方，避免遮住卡片本身
+        QToolTip.showText(QCursor.pos(), full, self, self._hover_advice_rect)
+
     def _paint_advice(self, p):
         """事业 / 感情 / 出行 / 财务 分项建议。"""
         info = self.info
         main, dark = self.P["main"], self.P["dark"]
-        y, cell_h, cell_w, gap = 652, 54, 224, 12
+        y, cell_h, cell_w, gap = 647, 54, 227, 5
         advice = info["advice"]
         for i, key in enumerate(["事业", "感情", "出行", "财务"]):
             col, row = i % 2, i // 2
             x = 30 + col * (cell_w + gap)
-            cy = y + row * (cell_h + 4)
+            cy = y + row * (cell_h + 5)
             p.setPen(QPen(main, 1))
             p.setBrush(self.P["box_bg"])
             p.drawRoundedRect(QRectF(x, cy, cell_w, cell_h), 3, 3)
@@ -774,7 +1012,13 @@ class CalendarPage(QWidget):
                            Qt.AlignLeft | Qt.AlignVCenter, line2)
 
     def _paint_zodiac_watermark(self, p):
-        """底部当日生肖剪影水印（随主题红 / 绿取图，透明度 20%）。"""
+        """当日生肖剪影水印（随主题红 / 绿取图，透明度 20%）。
+
+        v1.9.6：恢复 v1.9.4「底部区块」版式（用户指认 image#6 区域）——
+        ×0.9（高约 189px，v1.9.4 基准）水平居中（中线 x=260），垂直居中
+        压在 吉时/颜色 + 建议 卡片区块（y 574..760）上，20% 透明度，绘于
+        页脚之前（版权行后画不受影响）；宜/忌中缝改压 40% 八卦水印。
+        """
         sx = self.info.get("day_shengxiao")
         if not sx:
             return
@@ -783,10 +1027,12 @@ class CalendarPage(QWidget):
         src = _pix_cached(path)
         if src.isNull():
             return
-        # 等比缩放到高约 210px，居中压在底部区块上作水印
-        w, h = int(src.width() * 210.0 / src.height()), 210
-        x = (self.PAGE_W - w) // 2
-        y = 566 + (212 - h) // 2
+        # 等比缩放到高约 189px（210 × 0.9），居中压在底部区块上作水印
+        base_h = 189
+        w, h = int(src.width() * base_h / src.height()), base_h
+        x = 260 - w // 2
+        block_top, block_bot = 574, 760
+        y = (block_top + block_bot) // 2 - h // 2
         p.save()
         p.setOpacity(0.2)
         p.drawPixmap(x, y, w, h, _pix_scaled(path, w, h))
@@ -796,7 +1042,9 @@ class CalendarPage(QWidget):
         # 版权行：英文品牌名（Copyright 2026 肆月Aperture）加粗，中文说明保持常规字重，
         # 既满足「英文加粗」，又保住这行的弱化观感（浅灰、不能抢主体）。
         base = QColor("#7a7a6e")
-        rect = QRect(0, self.PAGE_H - 70, self.PAGE_W, 16)
+        # v1.9.6：版权行上移到「建议卡底线 + 5px」——与 R1~R4 的 5px 间隔
+        # 系列一致（原 PAGE_H-70=778 与卡片底线间隔 23px，用户红框指认）。
+        rect = QRect(0, self.COPYRIGHT_Y, self.PAGE_W, 16)
         brand = VER.COPYRIGHT
         tail = " ｜ %s" % VER.LICENSE_NOTE
         fm = QFontMetricsF(_font(10, ZH_FONT))

@@ -44,7 +44,7 @@ from ui.theme import (  # noqa: F401
     _PIX_CACHE, _PIX_SCALED_CACHE, _PAPER_CACHE, _ZODIAC_DIR,
     _font, _lf_asset, _mail_pixmap, _paper_pixmap,
     _pix_cached, _pix_scaled, _tinted_pixmap, _tone_of,
-    palette_for, use_builtin_fonts)
+    palette_for, settings_path, use_builtin_fonts)
 from ui.page import CalendarPage  # noqa: F401  兼容再导出
 from ui.agenda import AgendaPanel, AgendaExportDialog, AgendaImportDialog  # noqa: F401
 from ui.dialogs import BaziDialog, SanqingDialog  # noqa: F401  兼容再导出
@@ -127,6 +127,10 @@ class MainWindow(QMainWindow):
                                                 self.settings.get("agenda_visible", True))
         self._day_visible = self.settings.get("day_visible",
                                               self.settings.get("agenda_visible", True))
+        # 已录入八字：生肖框自动联动八字年支生肖（v1.9.3）
+        _bx_sx = (self.bazi or {}).get("shengxiao")
+        if _bx_sx:
+            self.zodiac = _bx_sx
         if self.zodiac:
             idx = self.page.zodiac_box.findData(self.zodiac)
             if idx >= 0:
@@ -203,14 +207,18 @@ class MainWindow(QMainWindow):
     # ---------- 设置 ----------
     def _load_settings(self):
         try:
-            with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
+            with open(settings_path(), "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception:
             return {}
 
     def _save_settings(self):
         try:
-            with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+            p = settings_path()
+            d = os.path.dirname(p)
+            if d and not os.path.isdir(d):
+                os.makedirs(d, exist_ok=True)
+            with open(p, "w", encoding="utf-8") as f:
                 json.dump({"zodiac": self.zodiac,
                            "bazi": self.bazi,
                            "bazi_input": self._bazi_input,
@@ -235,37 +243,57 @@ class MainWindow(QMainWindow):
         self._apply_zodiac()
 
     def _apply_zodiac(self, update_page=True):
-        self.zodiac = self.page.zodiac_box.currentData()
-        rep = None
-        # 已录入八字：以八字年支生肖为基准，并叠加八字推演
-        brep = bazi_day_report(self.bazi, self.page.info) if self.bazi else None
-        if brep and brep.get("shengxiao"):
-            rep = analyze_zodiac_day(self.page.info, brep["shengxiao"])
-            rep["name"] = brep["shengxiao"]
-            rep["bazi_text"] = brep["text"]
-            rep["score"] = max(5, min(98, (rep["score"] + brep["score"]) // 2))
-        elif brep:
-            rep = brep
-            rep["name"] = "八字"
-        elif self.zodiac:
-            rep = analyze_zodiac_day(self.page.info, self.zodiac)
-            rep["name"] = self.zodiac
-        self.page.set_zodiac_report(rep)
+        try:
+            self.zodiac = self.page.zodiac_box.currentData()
+            rep = None
+            # 已录入八字：以八字年支生肖为基准，并叠加八字推演
+            brep = bazi_day_report(self.bazi, self.page.info) if self.bazi else None
+            if brep and brep.get("shengxiao"):
+                rep = analyze_zodiac_day(self.page.info, brep["shengxiao"])
+                rep["name"] = brep["shengxiao"]
+                rep["bazi_text"] = brep["text"]
+                rep["score"] = max(5, min(98, (rep["score"] + brep["score"]) // 2))
+            elif brep:
+                rep = brep
+                rep["name"] = "八字"
+            elif self.zodiac:
+                rep = analyze_zodiac_day(self.page.info, self.zodiac)
+                rep["name"] = self.zodiac
+            self.page.set_zodiac_report(rep)
+        except Exception:
+            # 任何推演异常都不应让页面停更：兜底清空，避免整页绘制崩溃
+            try:
+                self.page.set_zodiac_report(None)
+            except Exception:
+                pass
         self._save_settings()
 
     # ---------- 八字录入 ----------
     def _open_bazi(self):
         dlg = BaziDialog(self, self._bazi_input)
-        if dlg.exec() == dlg.Accepted:
+        # v1.9.5 根因修复：PySide6 6.11 实例上访问 dlg.Accepted 会 AttributeError
+        # （枚举只在类上），异常被 Qt 槽吞掉 → 保存/联动/落盘全部没执行。
+        # 必须用类级 QDialog.DialogCode.Accepted 比较。
+        if dlg.exec() == QDialog.DialogCode.Accepted:
             if dlg.cleared:          # 用户点「清除」：撤销八字推演
                 self.bazi = None
                 self._bazi_input = None
             else:                     # 保存：写入四柱并持久化
                 self.bazi = dlg.bazi
                 self._bazi_input = dlg.input_list
+                self._sync_zodiac_from_bazi()   # 八字↔生肖联动（v1.9.3）
             self._save_settings()
             self._apply_zodiac()
         dlg.deleteLater()
+
+    def _sync_zodiac_from_bazi(self):
+        """八字↔生肖联动：由八字年支自动识别生肖并选中下拉框（v1.9.3）。"""
+        sx = (self.bazi or {}).get("shengxiao")
+        if not sx:
+            return
+        idx = self.page.zodiac_box.findData(sx)
+        if idx >= 0 and self.page.zodiac_box.currentData() != sx:
+            self.page.zodiac_box.setCurrentIndex(idx)   # 触发 _on_zodiac_changed
 
     # ---------- 翻页 / 撕页 ----------
     def _flip(self, delta):

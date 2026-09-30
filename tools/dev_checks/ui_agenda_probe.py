@@ -222,7 +222,11 @@ pm._apply_theme(QColor("#1f9c3d"))          # 还原绿态
 
 # ---------------- 6. 窗口位置：贴边吸附 / 记忆 / 初始化（v1.7.2 反馈） ----------------
 import ui_main as _uim
-_uim.SETTINGS_PATH = os.path.join(BOX, "settings.json")   # 不碰用户真实 settings.json
+import ui.theme as _uit
+# v1.9.4：_save_settings 经 settings_path() 写盘，读取的是 theme.SETTINGS_PATH，
+# 故需同时重定向 theme 全局（仅 ui_main 的副本不够）。不碰用户真实 settings.json。
+_uim.SETTINGS_PATH = os.path.join(BOX, "settings.json")
+_uit.SETTINGS_PATH = os.path.join(BOX, "settings.json")
 from ui_main import MainWindow
 
 mw = MainWindow()

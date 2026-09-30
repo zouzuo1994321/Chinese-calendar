@@ -92,6 +92,17 @@ def sans_css():
     return ", ".join("'%s'" % f for f in sans_families())
 
 
+def serif_css():
+    """给 QSS 用的 font-family 串（内置宋体优先）。
+
+    v1.9.6：生肖下拉框 / 下拉列表改用本串 —— 内置黑体（Noto Sans SC）
+    子集只覆盖顶栏小控件的拉丁与常用字形，生肖两字（子鼠…亥猪）在
+    下拉列表里渲染成「--」；宋体（Noto Serif SC）随整页自绘文字使用，
+    CJK 字形齐备，且与页面印刷风格一致。
+    """
+    return ", ".join("'%s'" % f for f in serif_families())
+
+
 def report():
     """返回一行自检信息，供「关于本软件」显示字体状态。"""
     fams = install_fonts()

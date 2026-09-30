@@ -99,6 +99,11 @@ ZHI_SHENGXIAO = {"子": "鼠", "丑": "牛", "寅": "虎", "卯": "兔", "辰": 
                  "午": "马", "未": "羊", "申": "猴", "酉": "鸡", "戌": "狗", "亥": "猪"}
 SHENGXIAO_ZHI = {v: k for k, v in ZHI_SHENGXIAO.items()}
 SHENGXIAO_LIST = ["鼠", "牛", "虎", "兔", "龙", "蛇", "马", "羊", "猴", "鸡", "狗", "猪"]
+# v1.9.5：生肖统一两字显示（地支 + 生肖），如 子鼠 / 丑牛 … 亥猪。
+#   顺序与 SHENGXIAO_LIST 对齐（即地支顺序），供下拉框逐项配对。
+SHENGXIAO_2CHAR = ["%s%s" % (z, s) for z, s in ZHI_SHENGXIAO.items()]
+# 单字生肖 → 两字（用于显示层统一转换，底层数据仍保持单字以兼容 findData 联动）。
+ANIMAL_TO_2CHAR = {s: "%s%s" % (z, s) for z, s in ZHI_SHENGXIAO.items()}
 
 WEEK_CN = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
 WEEK_EN = ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"]
@@ -437,7 +442,8 @@ def analyze_zodiac_day(info: dict, shengxiao: str) -> dict:
     self_xing = {"辰", "午", "酉", "亥"}
     if (zhi, day_zhi) in xing_pairs or (day_zhi, zhi) in xing_pairs:
         tags.append("相刑")
-        tips.append("与日支相刑， friction 易起，忍让为先，不宜争执硬顶")
+        # v1.9.10：英文词 friction → 「摩擦」（用户反馈「文字中如有英文则翻译为中文」）。
+        tips.append("与日支相刑，摩擦易起，忍让为先，不宜争执硬顶")
     if zhi == day_zhi and zhi in self_xing:
         tags.append("自刑")
         tips.append("值日且自刑，易自寻烦恼，放宽心、不钻牛角尖")
@@ -727,7 +733,14 @@ def bazi_day_report(bazi: dict, info: dict):
         tips.append("八字与今日干支无刑合冲害，平常心度过，按部就班即可")
 
     adj = sum(_BAZI_ADJ.get(t, 0) for t in tags)
-    score = max(5, min(98, int(info["fortune_score"] * 0.5 + 50 + adj)))
+    # v1.9.9 重标定：原式 `fortune_score*0.5 + 50 + adj` 的**固定 +50 偏移**使
+    # adj=0 时得分已 ≈80（当日基础分中位 60），加上正向标签偏多，全年 64% 的天数
+    # 都 ≥80、中位 83，且换任何出生日期都一样（实测 8 个八字中位 82~83）——
+    # 用户反馈「八字输入后分数普遍比较高」，确认为**公式标定偏移**，非排盘错误
+    # （四柱经 lunar_python 核验正确）也非命盘特性。
+    # 改为 0.6*f + 30 + adj：中位 69 / 均值 68.3 / 范围 34..97，仍保留八字比
+    # 生肖路径（f + adj，中位 64）更亮眼的「强化」定位，但不再人人 80+。
+    score = max(5, min(98, int(info["fortune_score"] * 0.6 + 30 + adj)))
     wx_txt = "（%s命）" % u_wx if u_wx else ""
     text = "日主%s%s ｜ %s" % (pillars[2], wx_txt, "、".join(tags[:4]))
     return {"tags": tags, "score": score, "text": text, "tips": tips,

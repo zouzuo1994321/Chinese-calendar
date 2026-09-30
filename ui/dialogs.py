@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QGridLayout,
                                QHBoxLayout, QLabel, QMessageBox, QPushButton,
                                QSpinBox, QVBoxLayout)
 
-from calendar_app.engine import compute_eightchar
+from calendar_app.engine import compute_eightchar, ANIMAL_TO_2CHAR
 
 from ui.theme import _font, IMG_XIANGLU, IMG_ZUSHIYE, ZH_FONT
 
@@ -324,7 +324,8 @@ class BaziDialog(QDialog):
             self.bazi = None
             return
         pillars = res["pillars"]
-        sx = res["shengxiao"] or "—"
+        # v1.9.5：生肖统一两字显示（子鼠…亥猪）
+        sx = ANIMAL_TO_2CHAR.get(res["shengxiao"] or "", res["shengxiao"] or "—")
         self.preview.setText("四柱：%s ｜ 生肖：%s" % (
             " ".join(p or "—" for p in pillars), sx))
         self.bazi = res

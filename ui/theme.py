@@ -17,6 +17,24 @@ else:
 
 SETTINGS_PATH = os.path.join(_BASE, "settings.json")
 
+
+def settings_path():
+    """可写配置路径（v1.9.4）。
+
+    frozen 时优先 exe 同目录；若该目录只读（如 Program Files / 网络盘）
+    或尚未生成且不可写，回退到 %APPDATA%/农历日历/settings.json，
+    避免「八字等配置无法保存」的静默失败。
+    """
+    p = SETTINGS_PATH
+    if getattr(sys, "frozen", False):
+        if os.path.exists(p):
+            return p
+        if os.access(os.path.dirname(p) or ".", os.W_OK):
+            return p
+        appdata = os.environ.get("APPDATA") or os.path.expanduser("~")
+        return os.path.join(appdata, "农历日历", "settings.json")
+    return p
+
 # 祭拜三清素材（frozen：随包附带于 _MEIPASS/祖师爷；源码：项目根/祖师爷）
 if getattr(sys, "frozen", False):
     _ASSET_DIR = os.path.join(
