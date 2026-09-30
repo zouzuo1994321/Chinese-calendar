@@ -213,7 +213,7 @@ ck("[5] 相位不同 → 数字区亮度不同（确有流光）", lo != hi, "v(
 ck("回归 法定假日 → 红", palette_for({"holiday": "国庆节"})["main"].name() == "#c62828")
 ck("回归 平日 → 绿", palette_for({})["main"].name() == "#1f9c3d")
 ck("回归 版本号 v%s / %s" % (APP_VERSION, BUILD_CODE),
-   APP_VERSION == "1.9.11" and BUILD_CODE == "2609300012", VERSION_TITLE)
+   APP_VERSION == "1.9.12" and BUILD_CODE == "2609300013", VERSION_TITLE)
 ck("回归 生肖水印素材齐备",
    all(os.path.exists(os.path.join(_ZODIAC_DIR, "%s（%s）.png" % (s, t)))
        for s in ("龙", "马") for t in ("红", "绿")))
@@ -693,22 +693,47 @@ finally:
 # 用户明确要求：「把软件截图直接加入 readme 中避免每次还要外链，并且有图片丢失的可能」。
 # 每次跑 verify_ui 都重渲染截图 → 重嵌 base64，保证 README 里的图永远是最新的。
 def _embed_shots_to_readme():
+    """把四张截图以 base64 内嵌进 README 的「真实截图」小节。
+
+    ⚠ v1.9.12：**整节重建**，不再只做 `![alt](url)` 定点替换。
+    原因：曾出现 README 的 `![绿日](data:...)` 被外部（编辑器/格式化）改回**纯占位文字**
+    `| 绿日 |`，此时定点替换找不到锚点 → 静默跳过 → 四张图永久丢失（`[10]` 会红）。
+    改为用正则定位「## 📸 真实截图 … 至下一个 `---`」整块并重写，无论此前被改成什么样都能自愈。
+    """
     import re, base64
     pairs = [("绿日", "screenshot-green.png"), ("红日", "screenshot-red.png"),
              ("窗口", "screenshot-window.png"), ("高光", "screenshot-sheen.png")]
-    src = open("README.md", encoding="utf-8").read()
+    uris = {}
     for alt, fn in pairs:
         path = os.path.join("docs", "screenshots", fn)
         if not os.path.exists(path):
             print("⚠ 截图缺失，跳过内嵌:", fn)
-            continue
-        b64 = base64.b64encode(open(path, "rb").read()).decode("ascii")
-        data_uri = "data:image/png;base64," + b64
-        # 匹配 ![alt](任意URL) —— base64 不会含 ')'，故 [^)]* 安全
-        pattern = r'!\[' + re.escape(alt) + r'\]\([^)]*\)'
-        src, n = re.subn(pattern, '![' + alt + '](' + data_uri + ')', src)
-        if n == 0:
-            print("⚠ README 未找到 ![alt] 标记:", alt)
+            return
+        uris[alt] = "data:image/png;base64," + base64.b64encode(
+            open(path, "rb").read()).decode("ascii")
+    section = (
+        "## 📸 真实截图\n\n"
+        "| 绿日（平日） | 红日（法定假日） |\n"
+        "| :----: | :------: |\n"
+        "| ![绿日](%s) | ![红日](%s) |\n\n"
+        "| 完整窗口（含叠页纸面与边框） | 数字高光流动的瞬间 |\n"
+        "| :------------: | :-------: |\n"
+        "| ![窗口](%s) | ![高光](%s) |\n\n"
+        "> 截图由 `tools/dev_checks/verify_ui.py` 离屏渲染真实窗口内容生成，所见即所得。  \n"
+        "> 自 v1.8.0 起软件**内置全部字体**（Noto Serif SC / Noto Sans SC 子集），"
+        "因此字形在任何 Windows 设备上都完全一致。"
+        % (uris["绿日"], uris["红日"], uris["窗口"], uris["高光"]))
+    src = open("README.md", encoding="utf-8").read()
+    pat = re.compile(r"## 📸 真实截图\n.*?(?=\n---\n)", re.S)
+    if pat.search(src):
+        src = pat.sub(lambda _m: section, src, count=1)
+    else:
+        # 兜底：整节定位失败时，退回定点替换（至少保住已有锚点的情况）
+        for alt, fn in pairs:
+            _p = r'!\[' + re.escape(alt) + r'\]\([^)]*\)'
+            src, n = re.subn(_p, '![' + alt + '](' + uris[alt] + ')', src)
+            if n == 0:
+                print("⚠ README 未找到 ![alt] 标记且整节定位失败:", alt)
     open("README.md", "w", encoding="utf-8").write(src)
 
 _embed_shots_to_readme()
@@ -1080,6 +1105,12 @@ _ico19 = os.path.join(os.path.dirname(IMG_LOGO), "logo.ico")
 ck("[19] logo.ico 已按新版重生成（多尺寸，含 256²）",
    os.path.exists(_ico19) and os.path.getsize(_ico19) > 100000,
    "logo.ico = %d B" % (os.path.getsize(_ico19) if os.path.exists(_ico19) else -1))
+
+# ---- [20] v1.9.12：宜/忌分隔虚线改到「分数区」与「八字推演行」之间的居中 ----
+_src_zx2 = inspect.getsource(CalendarPage._paint_zodiac)
+ck("[20] 虚线移到「分数区」与「八字推演行」之间居中（line_y = y + 2 → 行 541..542）",
+   "line_y = y + 2" in _src_zx2 and "drawLine(30, line_y" in _src_zx2,
+   "用户反馈「虚线放在 分数 和 八字推演 居中位置」：行 536..537 → 541..542")
 
 failed = [n for n, c, _ in R if not c]
 print("\n==== UI 复核 (v%s) ==== total=%d passed=%d failed=%d"

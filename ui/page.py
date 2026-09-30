@@ -880,8 +880,15 @@ class CalendarPage(QWidget):
         y = 540
         if not rep:
             return    # 未选生肖：提示语已移至分数旁
+        # v1.9.12：虚线改到「分数区」与「八字推演行」之间的正中（用户反馈
+        # 「调整虚线位置，放在 分数 和 八字推演 居中位置」）。分数区最低点 =
+        # 左侧「吉/平/凶」方框底线（drawRect(30,484,52,52)+2px 笔 → 占用行 535..536），
+        # 「八字推演」文字墨迹顶点 = 行 548 → 二者之间空白带 537..547（共 11 行），
+        # 正中最靠近行 542。原 y-3 画在行 536..537、紧贴方框底（上方仅 0 行空白），
+        # 故下移到 y+2（绘制行 541..542：上留白 4 行 / 下留白 5 行，基本对称）。
+        line_y = y + 2
         p.setPen(QPen(main, 1, Qt.DashLine))
-        p.drawLine(30, y - 3, self.PAGE_W - 30, y - 3)
+        p.drawLine(30, line_y, self.PAGE_W - 30, line_y)
         # v1.9.10：八字推演行加粗（用户反馈「八字推演 字体加粗」）。
         # 内置 Noto Serif SC 带真实 Bold 面，直接用 QFont.Bold（不用 setItalic，
         # 否则会吞掉字重轴，见 theme._font 注释）。
