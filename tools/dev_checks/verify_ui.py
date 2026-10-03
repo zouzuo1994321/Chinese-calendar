@@ -213,7 +213,7 @@ ck("[5] 相位不同 → 数字区亮度不同（确有流光）", lo != hi, "v(
 ck("回归 法定假日 → 红", palette_for({"holiday": "国庆节"})["main"].name() == "#c62828")
 ck("回归 平日 → 绿", palette_for({})["main"].name() == "#1f9c3d")
 ck("回归 版本号 v%s / %s" % (APP_VERSION, BUILD_CODE),
-   APP_VERSION == "1.9.12" and BUILD_CODE == "2609300013", VERSION_TITLE)
+   APP_VERSION == "1.9.16" and BUILD_CODE == "2609300017", VERSION_TITLE)
 ck("回归 生肖水印素材齐备",
    all(os.path.exists(os.path.join(_ZODIAC_DIR, "%s（%s）.png" % (s, t)))
        for s in ("龙", "马") for t in ("红", "绿")))
@@ -1047,19 +1047,66 @@ ck("[16] 删除底部「叠页」装饰 _paint_stack（浅灰横带 #eeebe0）",
    not hasattr(CalendarPage, "_paint_stack") and "_paint_stack" not in _src_pt,
    "用户反馈「红框部分好像有一个灰色的框，删除」：满宽 y802..820 横带")
 
-# ---- [17] v1.9.9：八字运势得分重标定（修「分数普遍偏高」的公式偏移）----
+# ---- [17] v1.9.16：八字评分 = 「本命生肖分」锚定 ±10 内的子平法修正 ----
 from datetime import timedelta as _td
 from calendar_app import engine as _eng
 _src_bz = inspect.getsource(_eng.bazi_day_report)
-ck("[17] 八字得分公式重标定：0.5*f+50+adj → 0.6*f+30+adj（去掉 +50 固定偏移）",
-   "* 0.6 + 30 + adj" in _src_bz and "* 0.5 + 50" not in _src_bz,
-   "用户反馈「八字输入后分数普遍比较高」：原式中位 83 / ≥80 占 64%")
+_src_eng = inspect.getsource(_eng)
+ck("[17] 旧固定加减式已退役（0.6*f+30+adj / 0.5*f+50 均不再出现），改走子平法底座",
+   "* 0.6 + 30 + adj" not in _src_bz and "* 0.5 + 50" not in _src_bz
+   and "_BAZI_ADJ" not in _src_eng and "day_master_profile(pillars)" in _src_bz,
+   "用户反馈「个人录入后的分数，引入更加专业的计算方式」")
+ck("[17] v1.9.15 的虚高基座已退役（常数 64 + (fs-55)*0.55 不再出现），改锚定生肖分",
+   "64.0 + ys" not in _src_bz and "(info[\"fortune_score\"] - 55.0)" not in _src_bz
+   and "refine_baseline(pillars, prof)" in _src_bz
+   and "analyze_zodiac_day(info, y_sx)" in _src_bz,
+   "用户反馈「分数普遍偏高」：基座把中位抬到 70，现锚定生肖分后回归中性")
+ck("[17] 子平法底座齐备：地支藏干加权 + 旺相休囚死 + 十神 + 扶抑取用神",
+   all(k in _src_eng for k in ("ZHI_CANGGAN", "GAN_YINYANG", "WANG_STAGE_TABLE",
+                               "WANG_STAGE_SCORE", "def shishen(",
+                               "def day_master_profile(", "def wang_stage(")),
+   "月支权重 3.0（得令）/ 日支 2.0（得地）")
+ck("[17] 十神推断正确（日主丙火：甲偏印 丁劫财 戊食神 己伤官 庚偏财 辛正财 壬七杀 癸正官）",
+   [_eng.shishen("丙", g) for g in "甲丁戊己庚辛壬癸"]
+   == ["偏印", "劫财", "食神", "伤官", "偏财", "正财", "七杀", "正官"])
 _bz = _eng.compute_eightchar(1994, 3, 21, 13)
+_pf = _eng.day_master_profile(_bz["pillars"])
+ck("[17] 用户样本（甲戌·丁卯·丙午·乙未）判「身强」，喜克泄耗（水土金）/ 忌印比（木火）",
+   _pf["strong"] and set(_pf["xi"]) == {"水", "土", "金"}
+   and set(_pf["ji"]) == {"木", "火"},
+   "日主%s ratio=%.3f（印重比助）" % (_pf["ri_gan"], _pf["ratio"]))
 _bs = sorted(_eng.bazi_day_report(_bz, get_day_info(date(2026, 1, 1) + _td(days=i)))["score"]
              for i in range(0, 365, 7))
-ck("[17] 抽样全年得分中位落在 60~75（不再人人 80+，保留八字优势）",
-   60 <= _bs[len(_bs) // 2] <= 75 and max(_bs) <= 98,
+ck("[17] 抽样全年得分中位落在 55~70（回归中性）、分数恒在 5..98",
+   55 <= _bs[len(_bs) // 2] <= 70 and 5 <= _bs[0] and _bs[-1] <= 98,
    "中位=%d 范围=%d..%d" % (_bs[len(_bs) // 2], _bs[0], _bs[-1]))
+# 个性化硬指标：同一天不同八字应给出明显不同的分数（旧式「换个八字分布一样」做不到）
+_bzs = [_eng.compute_eightchar(*a) for a in
+        ((1994, 3, 21, 13), (1975, 12, 30, 22), (2001, 6, 15, 5))]
+_infos = [get_day_info(date(2026, 1, 1) + _td(days=i)) for i in range(0, 365, 7)]
+_seq = [[_eng.bazi_day_report(b, inf)["score"] for inf in _infos] for b in _bzs]
+_spread = sum(max(c) - min(c) for c in zip(*_seq)) / float(len(_infos))
+ck("[17] 同日不同八字平均分差 ≥ 12、且三条序列互不相同（评分真正因人而异）",
+   _spread >= 12 and len({tuple(s) for s in _seq}) == len(_seq),
+   "平均分差 %.1f" % _spread)
+# ★ v1.9.16 用户口径：个人分恒在「本命生肖分」±10 内，且年均偏离 ≈ 0（整体中性）
+_dev = []
+for _b in _bzs:
+    _sx = _b["shengxiao"]
+    for _inf in _infos:
+        _dev.append(_eng.bazi_day_report(_b, _inf)["score"]
+                    - _eng.analyze_zodiac_day(_inf, _sx)["score"])
+ck("[17] ⭐ 个人分恒在「本命生肖分」±10 以内（用户口径）",
+   all(abs(d) <= 10 for d in _dev),
+   "越界 %d / %d，极值 %d..%d" % (sum(1 for d in _dev if abs(d) > 10),
+                                  len(_dev), min(_dev), max(_dev)))
+ck("[17] ⭐ 个人分与生肖分年均偏离 ≈ 0（整体中性，不再普遍偏高）",
+   abs(sum(_dev) / len(_dev)) <= 1.5,
+   "平均偏离 %+.2f" % (sum(_dev) / len(_dev)))
+ck("[17] refine_baseline 已剪掉干支关系的结构性正偏（各命盘期望 > 0）",
+   all(_eng.refine_baseline(_b["pillars"], _eng.day_master_profile(_b["pillars"])) > 0
+       for _b in _bzs),
+   "不修则每张命盘白拿 2~3 分")
 
 # ---- [18] v1.9.10：八字推行加粗 + 文案英文汉译 + 宜/忌居中 ----
 _src_zx = inspect.getsource(CalendarPage._paint_zodiac)
@@ -1111,6 +1158,60 @@ _src_zx2 = inspect.getsource(CalendarPage._paint_zodiac)
 ck("[20] 虚线移到「分数区」与「八字推演行」之间居中（line_y = y + 2 → 行 541..542）",
    "line_y = y + 2" in _src_zx2 and "drawLine(30, line_y" in _src_zx2,
    "用户反馈「虚线放在 分数 和 八字推演 居中位置」：行 536..537 → 541..542")
+
+# ---- [21] v1.9.14：任务栏图标「有 / 无」两态切换（悬浮窗交互规格） ----
+# 用户确认的规格：启动有图标 / 最小化只摘图标但窗口留在桌面 / 关闭全消失驻留托盘 /
+#   托盘左键唤起不带图标 / 托盘右键「显示/隐藏」唤起带图标。
+_src_ui = inspect.getsource(ui_main)
+_src_ex = inspect.getsource(MainWindow._write_exstyle)
+_src_sync = inspect.getsource(MainWindow._sync_taskbar_tab)
+_src_st = inspect.getsource(MainWindow._set_taskbar)
+ck("[21] _write_exstyle 两态：有→置 WS_EX_APPWINDOW 清 TOOLWINDOW",
+   "WS_EX_APPWINDOW = 0x00040000" in _src_ex and "WS_EX_TOOLWINDOW = 0x00000080" in _src_ex
+   and "| WS_EX_APPWINDOW) & ~WS_EX_TOOLWINDOW" in _src_ex)
+ck("[21] _write_exstyle 无图标态：置 WS_EX_TOOLWINDOW 清 APPWINDOW",
+   "| WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW" in _src_ex)
+ck("[21] ITaskbarList 即时增删 AddTab(4)/DeleteTab(5) + COM 兜底 hide/show",
+   "_taskbar_call(4 if self._taskbar_mode else 5, hwnd)" in _src_sync
+   and "self.hide()" in _src_sync)
+ck("[21] ⭐ showEvent 显示后**延一拍**显式增删按钮（修「托盘右键唤起仍无任务栏图标」）",
+   "QTimer.singleShot(0, lambda: self._sync_taskbar_tab(fallback=False))"
+   in inspect.getsource(MainWindow.showEvent),
+   "只改扩展样式位不足以让 shell 把按钮加回来 → 必须显式 AddTab")
+ck("[21] 可见态切换（_set_taskbar resync）走 _sync_taskbar_tab(fallback=True)",
+   "_sync_taskbar_tab(fallback=True)" in _src_st)
+ck("[21] _set_taskbar 记入 self._taskbar_mode（供 showEvent 自愈）",
+   "self._taskbar_mode = bool(taskbar)" in _src_st)
+_src_minf = inspect.getsource(MainWindow._minimize_to_float)
+ck("[21] 「最小化」= 只摘任务栏图标、窗口留在桌面（不调 showMinimized）",
+   "_set_taskbar(False, resync=True)" in _src_minf
+   and "self.showMinimized(" not in _src_minf,
+   "用户规格：最小化后任务栏图标不存在、桌面界面保持存在")
+ck("[21] btn_min 已改接 _minimize_to_float（不再走真最小化）",
+   "btn_min.clicked.connect(self._minimize_to_float)"
+   in inspect.getsource(MainWindow.__init__)
+   and "def showMinimized" not in inspect.getsource(ui_main),
+   "已删除 v1.9.13 的 showMinimized 覆写（QWidget 自带的 showMinimized 不再被改写）")
+_src_tg = inspect.getsource(MainWindow._toggle_visible)
+ck("[21] 托盘右键「显示/隐藏」唤起时带任务栏图标",
+   "_show_window(taskbar=True)" in _src_tg)
+_src_ta = inspect.getsource(MainWindow._on_tray_activated)
+ck("[21] 托盘左键唤起时不带任务栏图标",
+   "_show_window(taskbar=False)" in _src_ta)
+_src_sw = inspect.getsource(MainWindow._show_window)
+ck("[21] _show_window 先定样式位再 show（shell 才会按新位建按钮）",
+   "_set_taskbar(taskbar)" in _src_sw and "showNormal()" in _src_sw)
+_src_ce = inspect.getsource(MainWindow.closeEvent)
+ck("[21] 关闭：切无图标态 + hide（桌面与任务栏都消失，驻留托盘）",
+   "_set_taskbar(False, resync=True)" in _src_ce and "self.hide()" in _src_ce)
+ck("[21] 启动默认有任务栏图标（_taskbar_mode 初值 True）",
+   "self._taskbar_mode = True" in inspect.getsource(MainWindow.__init__))
+ck("[21] ITaskbarList 即时增删接口在位（CLSID/IID + AddTab/DeleteTab）",
+   "56FDF344" in _src_ui and "56FDF342" in _src_ui
+   and "def _taskbar_call(" in _src_ui and "def _guid(" in _src_ui)
+ck("[21] 真机探针 window_mode_probe.py 存在（任务栏两态实测）",
+   os.path.exists(os.path.join(_ROOT, "tools", "dev_checks",
+                               "window_mode_probe.py")))
 
 failed = [n for n, c, _ in R if not c]
 print("\n==== UI 复核 (v%s) ==== total=%d passed=%d failed=%d"

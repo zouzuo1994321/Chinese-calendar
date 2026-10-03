@@ -8,6 +8,7 @@
   ui/dialogs.py  祭拜三清 / 八字录入对话框
   ui_main.py     MainWindow + 对外再导出（兼容旧 import 路径与校验脚本）
 """
+import ctypes
 import json
 import os
 import sys
@@ -53,6 +54,68 @@ from ui.dialogs import BaziDialog, SanqingDialog  # noqa: F401  兼容再导出
 _AUTOSTART_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 
+# ---------- 任务栏按钮的即时增删（ITaskbarList，v1.9.14） ----------
+# 无边框窗口是 WS_POPUP，任务栏按钮由扩展样式位（WS_EX_APPWINDOW / WS_EX_TOOLWINDOW）决定。
+# 但窗口**当前可见**时仅改样式位，shell 不会立刻跟着增删按钮 —— ITaskbarList::AddTab /
+# DeleteTab 是文档指定的即时增删接口（4=AddTab、5=DeleteTab），可免去 hide→show 的闪烁。
+_CLSID_TASKBARLIST = "56FDF344-FD6D-11d0-958A-006097C9A090"
+_IID_ITASKBARLIST = "56FDF342-FD6D-11d0-958A-006097C9A090"
+
+
+class _GUID(ctypes.Structure):
+    _fields_ = [("Data1", ctypes.c_ulong), ("Data2", ctypes.c_ushort),
+                ("Data3", ctypes.c_ushort), ("Data4", ctypes.c_ubyte * 8)]
+
+
+def _guid(text):
+    import uuid
+    u = uuid.UUID(text)
+    return _GUID(u.time_low, u.time_mid, u.time_hi_version,
+                 (ctypes.c_ubyte * 8)(*u.bytes[8:]))
+
+
+_TASKBAR_CB = None          # 成功 → callable(idx, hwnd)->bool；失败 → False
+_TASKBAR_TRIED = False
+
+
+def _taskbar_call(idx, hwnd):
+    """调用 ITaskbarList 的 vtable 方法（4=AddTab / 5=DeleteTab）。成功且 HRESULT=0 返回 True。"""
+    global _TASKBAR_CB, _TASKBAR_TRIED
+    if sys.platform != "win32":
+        return False
+    if not _TASKBAR_TRIED:
+        _TASKBAR_TRIED = True
+        try:
+            ole32 = ctypes.windll.ole32
+            # 已初始化过会返回 S_FALSE / RPC_E_CHANGED_MODE，忽略（Qt 已为 GUI 线程初始化 OLE）
+            ole32.CoInitializeEx(None, 0x2)
+            clsid, iid = _guid(_CLSID_TASKBARLIST), _guid(_IID_ITASKBARLIST)
+            ptr = ctypes.c_void_p()
+            hr = ole32.CoCreateInstance(ctypes.byref(clsid), None, 0x1 | 0x4,
+                                        ctypes.byref(iid), ctypes.byref(ptr))
+            if hr == 0 and ptr.value:
+                vtbl_addr = ctypes.cast(ptr, ctypes.POINTER(ctypes.c_void_p))[0]
+                vtbl = ctypes.cast(ctypes.c_void_p(vtbl_addr),
+                                   ctypes.POINTER(ctypes.c_void_p))
+                proto = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p,
+                                           ctypes.c_void_p)
+                proto(vtbl[3])(ptr, None)          # HrInit
+
+                def _call(i, h):
+                    return proto(vtbl[i])(ptr, ctypes.c_void_p(int(h))) == 0
+                _TASKBAR_CB = _call                # 闭包持有 ptr，保证 COM 对象存活
+            else:
+                _TASKBAR_CB = False
+        except Exception:
+            _TASKBAR_CB = False
+    if not _TASKBAR_CB:
+        return False
+    try:
+        return bool(_TASKBAR_CB(idx, hwnd))
+    except Exception:
+        return False
+
+
 def set_autostart(enabled: bool, app_name: str, exe_path: str) -> bool:
     """在 HKCU\\...\\Run 下增删当前用户开机启动项。返回是否成功。"""
     if winreg is None:
@@ -92,7 +155,16 @@ class MainWindow(QMainWindow):
             VER.APP_NAME, VER.APP_VERSION, VER.BUILD_CODE))
         if os.path.exists(IMG_LOGO):
             self.setWindowIcon(QIcon(IMG_LOGO))
+        # 无边框窗口建出来是 WS_POPUP，任务栏图标的「有 / 无」完全由扩展样式位决定：
+        #   WS_EX_APPWINDOW（有按钮） ⇄ WS_EX_TOOLWINDOW（无按钮） —— 见 _set_taskbar。
+        # 交互规格（v1.9.14，用户逐项确认；整体参照「悬浮窗」）：
+        #   启动                    → 有任务栏图标
+        #   点「最小化」            → 窗口**留在桌面原地不动**，仅摘掉任务栏图标
+        #   点「关闭」              → 窗口与任务栏图标都消失，软件驻留系统托盘
+        #   关闭后点「托盘左键」    → 只把桌面窗口叫回来，**不带**任务栏图标
+        #   关闭后「托盘右键→显示/隐藏」→ 叫回桌面窗口，**带**任务栏图标
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
+        self._taskbar_mode = True          # 目标态：True＝任务栏有按钮
         margin = 8
         self.setFixedSize(CalendarPage.PAGE_W + margin * 2,
                           CalendarPage.PAGE_H + AgendaPanel.PANEL_H + margin * 2 + 4)
@@ -150,7 +222,7 @@ class MainWindow(QMainWindow):
         self.page.btn_today.clicked.connect(self._go_today)
         self.page.btn_tear.clicked.connect(self._tear)
         self.page.btn_about.clicked.connect(self._about)
-        self.page.btn_min.clicked.connect(self.showMinimized)
+        self.page.btn_min.clicked.connect(self._minimize_to_float)
         self.page.btn_close.clicked.connect(self.close)
         self.page.month_toggle_requested.connect(lambda: self._toggle_panel("month"))
         self.page.day_toggle_requested.connect(lambda: self._toggle_panel("day"))
@@ -252,7 +324,10 @@ class MainWindow(QMainWindow):
                 rep = analyze_zodiac_day(self.page.info, brep["shengxiao"])
                 rep["name"] = brep["shengxiao"]
                 rep["bazi_text"] = brep["text"]
-                rep["score"] = max(5, min(98, (rep["score"] + brep["score"]) // 2))
+                # v1.9.15：录入八字后**直接采用子平法专业分**（日主强弱 + 喜用神 +
+                # 流日契合度）。旧版与「仅看年支生肖」的分取平均，等于把专业信号
+                # 稀释掉一半，且生肖口径已被八字报告完全涵盖。
+                rep["score"] = brep["score"]
             elif brep:
                 rep = brep
                 rep["name"] = "八字"
@@ -355,16 +430,29 @@ class MainWindow(QMainWindow):
         self.tray.show()
 
     def _toggle_visible(self):
+        """托盘右键菜单「显示 / 隐藏」：隐藏 ↔ 显示。
+
+        v1.9.14 规格：走这条路的**显示**是唯一会让窗口**带上任务栏图标**的入口。
+        """
         if self.isVisible():
             self.hide()
         else:
-            self.showNormal()
-            self.raise_()
-            self.activateWindow()
+            self._show_window(taskbar=True)
 
     def _on_tray_activated(self, reason):
+        """托盘左键单击 / 双击：只把桌面窗口叫回来，**不带**任务栏图标（v1.9.14 规格）。"""
         if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick):
-            self._toggle_visible()
+            if self.isVisible():
+                self.hide()
+            else:
+                self._show_window(taskbar=False)
+
+    def _show_window(self, taskbar: bool):
+        """按指定任务栏模式把窗口显示出来（**先定样式位、再 show**，shell 才会按新位建按钮）。"""
+        self._set_taskbar(taskbar)
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
 
     def _quit_app(self):
         if self.tray is not None:
@@ -584,6 +672,90 @@ class MainWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
 
+    # ---------- 任务栏图标：有 / 无 两态切换（v1.9.14） ----------
+    def _minimize_to_float(self):
+        """「最小化」按钮：窗口**留在桌面原地不动**，只把任务栏图标摘掉。
+
+        v1.9.14 用户规格：「最小化后任务栏里的图标不需要存在，桌面的界面保持存在」。
+        故这里**不调用** `showMinimized()`（那是真最小化），只切到悬浮窗态（无任务栏按钮）。
+        """
+        self._set_taskbar(False, resync=True)
+
+    def _write_exstyle(self, taskbar: bool):
+        """把「有 / 无任务栏按钮」写进原生扩展样式位 `GWL_EXSTYLE`。
+
+        - 有按钮：置 `WS_EX_APPWINDOW`、清 `WS_EX_TOOLWINDOW`
+        - 无按钮：置 `WS_EX_TOOLWINDOW`、清 `WS_EX_APPWINDOW`（同时不进 Alt+Tab，符合悬浮窗）
+        不动 `WS_CAPTION` / `WS_THICKFRAME`：窗口仍是无边框、定尺寸。位已正确时直接返回。
+        """
+        if sys.platform != "win32":
+            return
+        try:
+            user32 = ctypes.windll.user32
+            hwnd = int(self.winId())
+            get = getattr(user32, "GetWindowLongPtrW", user32.GetWindowLongW)
+            setl = getattr(user32, "SetWindowLongPtrW", user32.SetWindowLongW)
+            get.restype = ctypes.c_ssize_t
+            get.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            setl.restype = ctypes.c_ssize_t
+            setl.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_ssize_t]
+            GWL_EXSTYLE = -20
+            WS_EX_TOOLWINDOW = 0x00000080
+            WS_EX_APPWINDOW = 0x00040000
+            ex = get(hwnd, GWL_EXSTYLE)
+            if taskbar:
+                want = (ex | WS_EX_APPWINDOW) & ~WS_EX_TOOLWINDOW
+            else:
+                want = (ex | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW
+            if want != ex:
+                setl(hwnd, GWL_EXSTYLE, want)
+                SWP_NOSIZE, SWP_NOMOVE, SWP_NOZORDER = 1, 2, 4
+                SWP_NOACTIVATE, SWP_FRAMECHANGED = 0x10, 0x20
+                user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
+                                    SWP_NOSIZE | SWP_NOMOVE | SWP_NOZORDER
+                                    | SWP_NOACTIVATE | SWP_FRAMECHANGED)
+        except Exception:
+            pass
+
+    def _sync_taskbar_tab(self, fallback: bool = False):
+        """显式让 shell 立刻按 `self._taskbar_mode` 增删任务栏按钮。
+
+        ⚠ **为什么光改扩展样式位不够**（v1.9.15 用户实测）：
+        窗口**由隐藏变可见**时，若它此前已被 shell 归入「无任务栏按钮」一类（`WS_EX_TOOLWINDOW`），
+        仅把该位清掉、再补上 `WS_EX_APPWINDOW`，shell **不会**自动把按钮加回来 ——
+        表现为「托盘右键『显示 / 隐藏』唤回窗口，但任务栏仍没有图标」。
+        文档指定的即时增删接口是 `ITaskbarList::AddTab(4) / DeleteTab(5)`。
+        `fallback=True` 时若 COM 不可用，退化为 hide→show 让 shell 重新枚举。
+        """
+        if sys.platform != "win32":
+            return
+        try:
+            hwnd = int(self.winId())
+        except Exception:
+            return
+        if _taskbar_call(4 if self._taskbar_mode else 5, hwnd):
+            return
+        if fallback and self.isVisible():
+            self.hide()
+            self.showNormal()
+
+    def _set_taskbar(self, taskbar: bool, resync: bool = False):
+        """切到「有 / 无任务栏按钮」两态之一，并记进 `self._taskbar_mode`。
+
+        `resync=True`（窗口**当前可见**时切换，如点「最小化」）会立即显式增删按钮。
+        """
+        self._taskbar_mode = bool(taskbar)
+        self._write_exstyle(self._taskbar_mode)
+        if resync:
+            self._sync_taskbar_tab(fallback=True)
+
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        # 每次显示都按当前模式自愈（幂等）：先写样式位，再**延到事件循环下一拍**显式
+        # 增删任务栏按钮 —— 确保原生窗口已完成 ShowWindow，shell 才会理会 AddTab。
+        self._write_exstyle(self._taskbar_mode)
+        QTimer.singleShot(0, lambda: self._sync_taskbar_tab(fallback=False))
+
     def moveEvent(self, ev):
         if not self._snapping:
             g = self.frameGeometry()
@@ -609,9 +781,12 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, ev):
         self._save_settings()
-        # 默认以托盘图标形式运行：点关闭仅隐藏到托盘，托盘菜单「退出」才真正退出
+        # 默认以托盘图标形式运行：点关闭仅隐藏到托盘，托盘菜单「退出」才真正退出。
+        # v1.9.14 规格：关闭后「桌面窗口 + 任务栏图标」都消失 —— 切悬浮窗态再 hide，
+        # 之后无论是托盘左键（不带图标）还是右键「显示/隐藏」（带图标）都按各自入口定。
         if self.tray is not None and self.tray.isVisible():
             ev.ignore()
+            self._set_taskbar(False, resync=True)
             self.hide()
             return
         super().closeEvent(ev)

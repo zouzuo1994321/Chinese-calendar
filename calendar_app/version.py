@@ -7,8 +7,8 @@
 """
 
 APP_NAME = "农历日历"
-APP_VERSION = "1.9.12"
-BUILD_CODE = "2609300013"
+APP_VERSION = "1.9.16"
+BUILD_CODE = "2609300017"
 COPYRIGHT = "Copyright 2026 肆月Aperture"
 LICENSE_NOTE = "本软件为开源软件，没有授权禁止用于商业用途。"
 

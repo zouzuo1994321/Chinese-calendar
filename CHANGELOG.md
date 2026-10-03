@@ -4,6 +4,91 @@
 
 ## 版本历史
 
+### v1.9.16 (Build 2609300017) — 2026-10-03
+
+- **修「个人八字分数普遍偏高」（用户反馈「修改之后分数普遍偏高，帮我查一下是数据上的问题还是就是这个结果」）**：
+  - **诊断（先定位、再改）**：新增 `probe_bazi_scale.py`，对 5 个不同八字扫全年 365 天，把 v1.9.15 的公式 `score = 64.0 + 用神项 + 干支项 + base_term` 逐项归因（复算值与终分误差 <0.1 分，归因可信）：
+    - 固定常数 `64.0` —— 年均 **+64.0**（写死的起点，比 50 分中点高 14 分）
+    - 通书基座 `(fs-55)*0.55` —— 年均 **+3.26**（锚点写 55，但全年 `fortune_score` 实际均值 **60.9**）
+    - 干支关系项（合/冲/刑/害/三合）—— 年均 **+2.58**（六合 1/12 + 三合 3/12 命中率高于六冲/六害各 1/12，正项量级盖过负项）
+    - 子平**用神项** —— 年均 **+0.38**（≈0，说明子平法算法本身没有偏置）
+    - 合计 ≈ **70.2** → 个人分中位 **70**；而同屏「通书生吉分」中位仅 **60**，整体高出一整档，80+「吉星高照」占比 **25.9% vs 3.6%（7 倍）**。
+  - **结论**：偏高是**口径/锚点**问题（三处固定加成），**不是**「这个人命里就顺」的结果——把数据换成任意八字，分布都一样高。
+  - **修法（按用户指定口径）**：`个人分 = 本命生肖分 ± 10 以内`
+    1. **锚点改用生肖分**：`analyze_zodiac_day(info, 本命八字生肖)`（= 通书当日分 + 生肖合冲修正），替换掉常数 64 与通书基座项；
+    2. **个人化项**＝用神五行契合 ＋ 逐柱干支关系，并新增 `refine_baseline()` **剪掉 60 甲子结构偏置**（否则每张命盘仍白拿 2~3 分）；
+    3. 经 `10 * tanh(raw / 12)` 压入 **±10 开区间**，`round` 后与生肖分相加（`score = anchor + refine`）。
+  - **实测**（`probe_bazi_prof.py`）：个人分与生肖分偏离 **恒在 ±10 内（0 / 2190 越界）**、年均偏离 **−0.07 分（完全中性）**；个人分中位由 70 → **63**；同日不同八字平均分差 **33.3 分**（个性化未被削弱）。
+  - **注释**：分数带占比中 80+ 仍占 18.8%，因锚点「生肖分」本身分布较宽（min 19 / max 98）——这是「锚定生肖分」口径的必然结果，若仍需再压可另议。
+- **验证**：`verify_ui.py` **156/156 → 160/160**（`[17]` 组新增「v1.9.15 虚高基座已退役」「±10 锚定」「年均中性」「refine_baseline 结构偏置」等断言；版本断言随 v1.9.16 更新）✓ · `probe_bazi_prof.py` 15/15 → **17/17** ✓ · `probe_bazi_scale.py`（新增）通过 ✓ · `window_mode_probe.py`（真机）17/17 ✓ · `ui_agenda_probe.py` 43/43 ✓ · `agenda_checks.py` 34/34 ✓ · `test_process.py` 18/18 ✓ · `font_weight_probe.py` 5/5（真机）✓ · `geom_probe.py` 通过 ✓ · `pyflakes` 零真实问题 ✓。
+- **改动文件**：`calendar_app/engine.py`（新增 `_jiazi_pairs / _daily_load / _xi_supply / _gan_zhi_terms / refine_baseline`，重写 `bazi_day_report` 的 ③a/③b/④，并入 `import math`；移除常数 64 与 `(fs-55)*0.55` 基座）、`calendar_app/version.py`、`tools/dev_checks/verify_ui.py`、`tools/dev_checks/probe_bazi_prof.py`、`tools/dev_checks/probe_bazi_scale.py`（新增）。
+- **清理**：删除失效探针 `tools/dev_checks/probe_bazi.py`（导入早已移除的 `ui.theme.SHENGXIAO_LIST`，早已无法运行，且职责已被 `probe_bazi_prof.py` 取代）。
+
+### v1.9.15 (Build 2609300016) — 2026-10-03
+
+- **修「关闭后托盘右键→显示/隐藏，唤回窗口仍不带任务栏图标」（用户实测反馈）**：
+  - **现象**：v1.9.14 的五条规格里前四条都对了，唯独**托盘右键「显示 / 隐藏」**唤回窗口时任务栏仍没有图标。
+  - **根因**（真机实测 `window_mode_probe.py`）：窗口**由隐藏变可见**时，它此前已被 shell 归入「无任务栏按钮」一类（`WS_EX_TOOLWINDOW`）；此时**仅把该位清掉、再补上 `WS_EX_APPWINDOW`，shell 不会自动把按钮加回来**——扩展样式位在「隐藏态」改变不触发 shell 重建按钮。
+  - **修法**：拆出 `_write_exstyle()`（只写位）与 **`_sync_taskbar_tab()`**（显式调 `ITaskbarList::AddTab(4) / DeleteTab(5)` 让 shell 立刻增删）；`showEvent` 里 **`QTimer.singleShot(0, …)` 延到事件循环下一拍**再同步一次（确保原生窗口已完成 `ShowWindow`）。COM 不可用时 `_set_taskbar(resync=True)` 仍保留 `hide→show` 兜底。
+  - **实测**：`window_mode_probe.py` 新增 4 条调用断言 —— 启动显示后发 `AddTab` ✓、最小化后发 `DeleteTab` ✓、托盘左键发 `DeleteTab` ✓、**托盘右键「显示 / 隐藏」发 `AddTab` ✓（本条即用户报的修复点）**。
+- **个人八字分数改「子平法」专业计算（用户反馈「个人录入后的分数，引入更加专业的计算方式」）**：
+  - **旧版问题**：只拿「用户**日柱** ↔ 今日」做一串固定加减（`fortune_score*0.6 + 30 + adj`），**完全没用年柱 / 月柱 / 时柱**，也没判日主强弱——换任何出生日期分数分布几乎一样（实测 6 个八字中位都是同一个数），谈不上个人化。
+  - **新版四步（`day_master_profile()` + 重写 `bazi_day_report()`）**：
+    1. **日主强弱**：四柱累计五行力量 —— 天干按位置加权（月干 1.5），地支按**藏干本气/中气/余气**（0.6/0.3/0.1）比例折算后再按位置加权（**月支 3.0 = 得令**、日支 2.0 = 得地、年/时支 1.5）；**帮身**（比劫＋印）vs **耗身**（食伤＋财＋官杀）→ 身强率 = 帮身 /（帮身＋耗身），≥0.5 判**身强**。
+    2. **喜用神 / 忌神**（扶抑法）：身强喜**克泄耗**（官杀 / 食伤 / 财），身弱喜**生扶**（印 / 比劫）。
+    3. **流日契合度**：把流日「天干 + 地支藏干」折成对**喜 / 忌**的五行供输（**主项**），再在四柱上**逐柱加权**（日柱 1.3 / 月柱 1.0 / 时柱 0.8 / 年柱 0.6）评定 合 / 冲 / 刑 / 害 / 三合 与天干五合相冲（次项）。**十神**（比肩…正印）按日主阴阳与五行生克严格推定。
+    4. **天时修正**：叠入通书当日分（权重 0.55），保留「黄道吉日更顺」的直觉。
+    - **⚠ 实测发现的偏差已修正**：身强有 3 个喜用元素、身弱只有 2 个，直接累计会让**身强命盘系统性高出约 6 分**（6 样本中位 73 vs 67）——故按「均匀日」期望把基线减掉，去掉这层与命理无关的偏置。
+  - **展示口径同步**：录入八字后，界面上的 **「本日运势」分数与今日成语直接采用专业八字分**（`ui_main._apply_zodiac`），不再与「仅看年支生肖」的分数取平均（那会把专业信号稀释一半，且生肖口径已被八字报告完全涵盖）。八字推演行文案升级为「日主丙午 ｜ 火命·身强 ｜ 今日甲申·偏印 ｜ 用神得助、干合」。
+  - **实测**（新增 `probe_bazi_prof.py`，**15/15**）：十神 10/10 全对；用户样本 1994-03-21 13:00 → 四柱 **甲戌·丁卯·丙午·乙未**、日主丙火 **ratio 0.752 判身强**、喜 **水/土/金**、忌 **木/火**；单八字年内跨度 53~64 分；**同一天不同八字平均分差 26.8 分**（最大 44）——真正的个人化；≥90 分天数占比 2~10%、≤40 分 0~2%；身强 / 身弱两组中位已无系统性差（70/69 vs 70/70/70/69）。
+- **验证**：`verify_ui.py` **150/150 → 156/156**（`[17]` 组整组重写为子平法 5 条；`[21]` 组新增 showEvent 延拍同步等断言；版本断言随 v1.9.15 更新）✓ · `window_mode_probe.py`（真机）**13/13 → 17/17** ✓ · `probe_bazi_prof.py`（新增）**15/15** ✓ · `ui_agenda_probe.py` 43/43 ✓ · `agenda_checks.py` 34/34 ✓ · `test_process.py` 18/18 ✓ · `font_weight_probe.py` 5/5（真实平台）✓ · `geom_probe.py` 通过 ✓ · `pyflakes` 零真实问题 ✓。
+- **改动文件**：`ui_main.py`（`_write_exstyle` / `_sync_taskbar_tab` 拆分 + `showEvent` 延拍同步 + `_apply_zodiac` 分数口径）、`calendar_app/engine.py`（新增 `GAN_YINYANG / WUXING_SHENG / WUXING_KE / ZHI_CANGGAN / WANG_STAGE_*` 与 `shishen / wang_stage / day_master_profile`，重写 `bazi_day_report`，移除 `_BAZI_ADJ` 旧固定加分表）、`calendar_app/version.py`、`tools/dev_checks/verify_ui.py`、`tools/dev_checks/window_mode_probe.py`、`tools/dev_checks/probe_bazi_prof.py`（新增）、`README.md`、`CHANGELOG.md`。
+
+### v1.9.14 (Build 2609300015) — 2026-09-30
+
+> **⚠ 本轮修正 v1.9.13 做反的行为方向。** 用户 2026-10-03 原始反馈「点最小化后任务栏不显示图标、桌面仍显示；关闭则两者都消失」是**需求规格**，不是 bug 描述——v1.9.13 误读成「最小化后任务栏图标不该丢」并据此把图标补了回去，方向正好相反。本轮按用户逐项确认的规格重做。
+
+- **任务栏图标改为「有 / 无」两态可切（用户逐项确认的悬浮窗交互规格）**：
+  - **规格**（`AskUserQuestion` 三项确认 + 原话）：
+
+    | 操作 | 桌面窗口 | 任务栏图标 |
+    | --- | --- | --- |
+    | 启动 | 显示 | **有** |
+    | 点「最小化」 | **留在桌面原地不动** | 去掉 |
+    | 点「关闭」 | 消失 | 消失（软件驻留系统托盘） |
+    | 关闭后「托盘左键单击」 | 唤回显示 | **不带** |
+    | 关闭后「托盘右键→显示/隐藏」 | 唤回显示 | **带** |
+
+  - **实现**：无边框窗口是 `WS_POPUP`，任务栏按钮完全由扩展样式位决定——新增 `MainWindow._set_taskbar(on)` 在 **`WS_EX_APPWINDOW`（有按钮）** 与 **`WS_EX_TOOLWINDOW`（无按钮，且不进 Alt+Tab，符合悬浮窗）** 之间切换，`SetWindowPos(..., SWP_FRAMECHANGED)` 生效，并把目标态记进 `self._taskbar_mode`。
+  - **可见态切换免闪烁**：窗口**当前可见**时仅改样式位，shell 不会立刻跟着增删按钮——故接入 **`ITaskbarList::AddTab / DeleteTab`**（`ctypes` 手工 vtable 调用，`CLSID 56FDF344-…` / `IID 56FDF342-…`，索引 4/5）即时增删；极少数 COM 不可用的机器退化为 `hide→show` 让 shell 重枚举。
+  - **「最小化」按钮语义改写**：`btn_min` 由 `showMinimized` 改接 **`_minimize_to_float`** —— **不真最小化**，窗口原地不动、只摘任务栏图标（用户原话「桌面的界面保持存在」）。v1.9.13 的 `showMinimized` 覆写与 `WS_MINIMIZEBOX / WS_SYSMENU` 补位**一并删除**（不再需要原生最小化位，也避免 Alt+Space 系统菜单提供真最小化而与规格冲突）。
+  - **启动 / 关闭 / 托盘的入口分工**：`__init__` 初值 `_taskbar_mode = True`（启动有图标）；`closeEvent` 切无图标态再 `hide()`（桌面与任务栏都消失）；`_on_tray_activated`（左键）走 `_show_window(taskbar=False)`；`_toggle_visible`（右键「显示 / 隐藏」）走 `_show_window(taskbar=True)`；`_show_window` **先定样式位再 `show()`**（shell 才会按新位建按钮）；`showEvent` 每次显示按 `_taskbar_mode` 幂等自愈。
+- **验证**：`verify_ui.py` **144/144 → 150/150**（`[21]` 组整组重写为悬浮窗规格 13 条；版本断言随 v1.9.14 更新）✓ · **`window_mode_probe.py`（新增，真实平台）13/13**：启动态 `exstyle=0x40000`(APPWINDOW) ✓ · ITaskbarList 可创建（AddTab HRESULT=0）✓ · 最小化后 `IsWindowVisible=True`／`IsIconic=False`／**位置尺寸不变**／`exstyle=0x80`(TOOLWINDOW) ✓ · 关闭后不可见且托盘仍在 ✓ · 托盘左键 `0x80` 无图标 ✓ · 托盘右键「显示/隐藏」`0x40000` 带图标 ✓ · `ui_agenda_probe.py` 43/43 ✓ · `agenda_checks.py` 34/34 ✓ · `test_process.py` 18/18 ✓ · `font_weight_probe.py` 5/5（真实平台）✓ · `geom_probe.py` 通过 ✓ · `pyflakes` 零真实问题 ✓。
+- **改动文件**：`ui_main.py`（新增 `_GUID/_guid/_taskbar_call` + `_set_taskbar` + `_minimize_to_float` + `_show_window`；改写 `_toggle_visible`/`_on_tray_activated`/`closeEvent`/`showEvent`；删除 `_fix_native_style`/`showMinimized`）、`calendar_app/version.py`、`tools/dev_checks/verify_ui.py`（`[21]` 重写）、`tools/dev_checks/window_mode_probe.py`（新增）、`tools/dev_checks/taskbar_minimize_probe.py`（删除，断言已随方向修正失效）、`README.md`、`CHANGELOG.md`。
+
+### v1.9.13 (Build 2609300014) — 2026-09-30
+
+> ⚠ **本轮行为方向做反了，已由 v1.9.14 修正**：把用户的需求规格误读成 bug，反而把最小化后的任务栏图标补了回来。保留此条以记录经过。
+
+- **修「点最小化后任务栏图标消失、无法再点它还原窗口」（用户反馈）**：
+  - **现象**：窗口本身能最小化，但**任务栏上的软件按钮随之消失**，用户失去「点任务栏还原窗口」这条路（只能靠托盘菜单「显示 / 隐藏」找回）。
+  - **真机实测根因**（`tools/dev_checks/taskbar_style_diag.py`，直接读运行中窗口的原生样式位）：
+    `setWindowFlags(Qt.FramelessWindowHint | Qt.Window)` 建出来的原生窗口是
+    **`WS_POPUP`**（`GWL_STYLE = 0x96000000`），且 **`GWL_EXSTYLE = 0x00000000`**——
+    **既没有 `WS_EX_APPWINDOW`、也没有 `WS_EX_TOOLWINDOW`**，同时缺 `WS_SYSMENU / WS_MINIMIZEBOX`。
+    Windows 对 **WS_POPUP 且不带 `WS_EX_APPWINDOW`** 的窗口，**不保证任务栏按钮**；最小化后按钮即被 shell 摘掉。
+    （文档原文：`WS_EX_APPWINDOW` —— *Forces a top-level window onto the taskbar when the window is visible*。）
+  - **修法**（`ui_main.MainWindow._fix_native_style`，Show 之后补原生样式位）：
+    - `GWL_STYLE`   \|= `WS_MINIMIZEBOX | WS_SYSMENU`（原生最小化语义位 / Alt+Space 系统菜单）
+    - `GWL_EXSTYLE` \|= **`WS_EX_APPWINDOW`**（关键：强制顶层窗口出现在任务栏）
+    - 随后 `SetWindowPos(..., SWP_FRAMECHANGED)` 令样式立即生效；**幂等**（位已齐直接返回，不重设窗口）。
+    - **不加 `WS_THICKFRAME`**（本窗 `setFixedSize` 定尺寸，避免长出可缩放边框触发二次贴边）；**不设 `WS_CAPTION`**（不会重新画出原生标题栏）；**不改窗口类型**（仍是无边框 `FramelessWindowHint | Qt.Window`，只补语义位）。
+    - **自愈**：`showEvent` 每次显示都补一次（托盘 `hide → showNormal` 后若 Qt 重置了扩展样式，`WS_EX_APPWINDOW` 会被抹掉 → 这里回填）；`showMinimized` 覆写，最小化前再兜底补一次。
+  - **备选方案（未采用）**：换用 `ITaskbarList::AddTab`（COM）显式请求 shell 加按钮——比 `WS_EX_APPWINDOW` 重得多，且需手工 vtable/CoCreateInstance，收益不抵复杂度；`WS_EX_APPWINDOW` 是文档级的正解。
+  - **实测**（`tools/dev_checks/taskbar_minimize_probe.py`，真实平台，**新增 10 项断言**）：Show 后 `GWL_STYLE = 0x960a0000`（含 MINIMIZEBOX/SYSMENU）、`GWL_EXSTYLE = 0x40000`（含 APPWINDOW）✓；`showMinimized()` 后 `IsIconic = True` 且**两组位仍在场**（`0xb60a0000 / 0x40000`）✓；`showNormal()` 可恢复、位仍在 ✓；**托盘 hide→show 一轮后 `WS_EX_APPWINDOW` 自愈回填** ✓。对照基线：裸无边框窗口 `style=0x96000000 exstyle=0x0`（无 APPWINDOW）。
+- **验证**：`verify_ui.py` **137/137 → 144/144**（新增 `[21]` 组 7 条：补 GWL_EXSTYLE / 补 GWL_STYLE / 幂等 / showEvent 自愈 / showMinimized 兜底 / 仍为无边框 / 探针存在；版本号断言随 v1.9.13 更新）✓ · `taskbar_minimize_probe.py`（新增，**真实平台**）**10/10** ✓ · `ui_agenda_probe.py` **43/43** ✓ · `agenda_checks.py` **34/34** ✓ · `test_process.py` **18/18** ✓ · `font_weight_probe.py` **5/5**（真实平台）✓ · `geom_probe.py` 通过 ✓ · `pyflakes` 零真实问题（仅 `ui_main` 兼容再导出的既有噪音）✓。
+- **改动文件**：`ui_main.py`（`_fix_native_style` 补 `GWL_EXSTYLE |= WS_EX_APPWINDOW`、`showEvent` 自愈、`showMinimized` 兜底、注释更正）、`calendar_app/version.py`、`tools/dev_checks/verify_ui.py`（`[21]` 断言 + 版本断言）、`tools/dev_checks/taskbar_minimize_probe.py`（重写，10 项）、`tools/dev_checks/taskbar_style_diag.py`（新增诊断）、`README.md`、`CHANGELOG.md`。
+
 ### v1.9.12 (Build 2609300013) — 2026-09-30
 
 - **「分数区 / 八字推演」之间的分隔虚线改到二者正中（用户截图 image#1：「调整虚线位置 放在 分数 和 八字推演 居中位置」）**：

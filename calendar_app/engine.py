@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import date
 
 from lunar_python import Solar
@@ -630,10 +631,220 @@ GAN_CHONG_PAIRS = [("甲", "庚"), ("庚", "甲"), ("乙", "辛"), ("辛", "乙"
 ZHI_XING_PAIRS = [("子", "卯"), ("卯", "子"), ("寅", "巳"), ("巳", "寅"),
                   ("巳", "申"), ("申", "巳"), ("丑", "戌"), ("戌", "丑"),
                   ("戌", "未"), ("未", "戌")]
-_BAZI_ADJ = {"干合": 8, "支六合": 8, "今日生我": 6, "我克为财": 4,
-             "生肖六合": 6, "生肖三合": 6, "比和": 3,
-             "干冲": -8, "支六冲": -10, "今日克我": -6,
-             "支六害": -5, "支相刑": -5, "生肖六冲": -8}
+# --------------------------------------------------------------------------
+# 五-B、子平法专业评分底座（v1.9.15）
+#   日主强弱（得令/得地/得势 → 五行力量）→ 扶抑取喜用神 → 流日契合度。
+#   数据口径：《渊海子平》《三命通会》通行藏干与人元司令比例。
+# --------------------------------------------------------------------------
+
+GAN_YINYANG = {"甲": 1, "乙": -1, "丙": 1, "丁": -1, "戊": 1,
+               "己": -1, "庚": 1, "辛": -1, "壬": 1, "癸": -1}   # 1=阳 -1=阴
+
+WUXING_SHENG = {"木": "火", "火": "土", "土": "金", "金": "水", "水": "木"}  # 我生（食伤）
+WUXING_KE = {"木": "土", "土": "水", "水": "火", "火": "金", "金": "木"}     # 我克（财）
+
+# 地支藏干：本气 / 中气 / 余气 的加权比例
+ZHI_CANGGAN = {
+    "子": [("癸", 1.0)],
+    "丑": [("己", 0.6), ("癸", 0.3), ("辛", 0.1)],
+    "寅": [("甲", 0.6), ("丙", 0.3), ("戊", 0.1)],
+    "卯": [("乙", 1.0)],
+    "辰": [("戊", 0.6), ("乙", 0.3), ("癸", 0.1)],
+    "巳": [("丙", 0.6), ("庚", 0.3), ("戊", 0.1)],
+    "午": [("丁", 0.7), ("己", 0.3)],
+    "未": [("己", 0.6), ("丁", 0.3), ("乙", 0.1)],
+    "申": [("庚", 0.6), ("壬", 0.3), ("戊", 0.1)],
+    "酉": [("辛", 1.0)],
+    "戌": [("戊", 0.6), ("辛", 0.3), ("丁", 0.1)],
+    "亥": [("壬", 0.7), ("甲", 0.3)],
+}
+
+# 月令旺衰：由生月地支定季节，再查五行「旺相休囚死」
+WANG_STAGE_SEASON = {"寅": "春", "卯": "春", "辰": "土",
+                     "巳": "夏", "午": "夏", "未": "土",
+                     "申": "秋", "酉": "秋", "戌": "土",
+                     "亥": "冬", "子": "冬", "丑": "土"}
+WANG_STAGE_TABLE = {
+    "春": {"木": "旺", "火": "相", "水": "休", "金": "囚", "土": "死"},
+    "夏": {"火": "旺", "土": "相", "木": "休", "水": "囚", "金": "死"},
+    "秋": {"金": "旺", "水": "相", "土": "休", "火": "囚", "木": "死"},
+    "冬": {"水": "旺", "木": "相", "金": "休", "土": "囚", "火": "死"},
+    "土": {"土": "旺", "金": "相", "火": "休", "木": "囚", "水": "死"},   # 辰未戌丑 四季土月
+}
+WANG_STAGE_SCORE = {"旺": 1.0, "相": 0.75, "休": 0.5, "囚": 0.3, "死": 0.15}
+
+# 流日与四柱逐柱比对的亲近权重（日柱最亲、月柱次之；年 / 时较疏）
+_ZHI_POS_W = {0: 0.6, 1: 1.0, 2: 1.3, 3: 0.8}
+_GAN_POS_W = {0: 0.6, 1: 1.0, 3: 0.7}
+
+
+def shishen(ri_gan: str, other_gan: str) -> str:
+    """十神：以日主 `ri_gan` 为基准，判 `other_gan` 的十神名（比肩…正印）。"""
+    a = GAN_WUXING.get(ri_gan)
+    b = GAN_WUXING.get(other_gan)
+    if not a or not b:
+        return "—"
+    same = GAN_YINYANG.get(ri_gan) == GAN_YINYANG.get(other_gan)
+    if b == a:
+        return "比肩" if same else "劫财"
+    if WUXING_SHENG[a] == b:
+        return "食神" if same else "伤官"      # 我生
+    if WUXING_KE[a] == b:
+        return "偏财" if same else "正财"      # 我克
+    if BE_KE[a] == b:
+        return "七杀" if same else "正官"      # 克我
+    if SHENG_SRC[a] == b:
+        return "偏印" if same else "正印"      # 生我
+    return "—"
+
+
+def wang_stage(wuxing: str, month_zhi: str) -> str:
+    """五行在生月（月支）所处的「旺 / 相 / 休 / 囚 / 死」。"""
+    return WANG_STAGE_TABLE.get(WANG_STAGE_SEASON.get(month_zhi, "土"),
+                                {}).get(wuxing, "休")
+
+
+def day_master_profile(pillars) -> dict:
+    """**日主强弱**与**喜用神 / 忌神**（扶抑法）。
+
+    做法（子平通行口径）：
+      ① 逐柱累计五行力量 —— 天干按位置加权重（月干最重），地支按**藏干本气/中气/余气**
+         比例折算后再按位置加权重（**月支权重最高=3.0**，即「得令」；日支 2.0=「得地」）。
+      ② 帮身 = 比劫（同我）+ 印（生我）；耗身 = 食伤（我生）+ 财（我克）+ 官杀（克我）。
+      ③ 身强率 = 帮身 / (帮身 + 耗身)，≥0.5 判**身强**。
+      ④ 扶抑取用：**身强喜克泄耗**（官杀 / 食伤 / 财），**身弱喜生扶**（印 / 比劫）。
+
+    :return: {"ri_gan","ri_wx","ratio","strong","stage","xi","ji","power"}
+    """
+    ri_gan = pillars[2][0]
+    ri_wx = GAN_WUXING[ri_gan]
+    yue_zhi = pillars[1][-1] if pillars[1] and len(pillars[1]) > 1 else ""
+    gan_w = {0: 1.0, 1: 1.5, 3: 1.0}            # 年干 / 月干 / 时干（日干即日主，不计入）
+    zhi_w = {0: 1.5, 1: 3.0, 2: 2.0, 3: 1.5}    # 年支 / 月支 / 日支 / 时支
+    power = {w: 0.0 for w in ("木", "火", "土", "金", "水")}
+    for i, p in enumerate(pillars):
+        if not p or len(p) < 2:
+            continue
+        if i != 2:
+            power[GAN_WUXING[p[0]]] += gan_w.get(i, 1.0)
+        for cg, ratio in ZHI_CANGGAN.get(p[-1], []):
+            power[GAN_WUXING[cg]] += zhi_w.get(i, 1.0) * ratio
+    helper = power[ri_wx] + power[SHENG_SRC[ri_wx]]                     # 帮身：比劫 + 印
+    drain = (power[WUXING_SHENG[ri_wx]] + power[WUXING_KE[ri_wx]]
+             + power[BE_KE[ri_wx]])                                     # 耗身：食伤 + 财 + 官杀
+    ratio = helper / (helper + drain) if (helper + drain) > 0 else 0.5
+    strong = ratio >= 0.5
+    if strong:
+        xi = [BE_KE[ri_wx], WUXING_SHENG[ri_wx], WUXING_KE[ri_wx]]      # 官杀 / 食伤 / 财
+        ji = [SHENG_SRC[ri_wx], ri_wx]                                  # 印 / 比劫
+    else:
+        xi = [SHENG_SRC[ri_wx], ri_wx]
+        ji = [BE_KE[ri_wx], WUXING_SHENG[ri_wx], WUXING_KE[ri_wx]]
+    return {"ri_gan": ri_gan, "ri_wx": ri_wx, "ratio": ratio, "strong": strong,
+            "stage": wang_stage(ri_wx, yue_zhi), "xi": xi, "ji": ji, "power": power}
+
+
+# --------------------------------------------------------------------------
+# 五-C、个人化修正项（v1.9.16）
+#   个人分 = 「本命生肖分」＋「个人化修正」；修正 = 用神五行契合 + 逐柱干支关系。
+#   剪掉结构性正偏后压缩到 ±10 以内，保证：① 年均中性；② 不偏离本命生肖分超 10 分。
+# --------------------------------------------------------------------------
+
+_JIAZI_CACHE = None
+_REFINE_BASELINE_CACHE = {}
+
+
+def _jiazi_pairs():
+    """60 甲子的 (天干, 地支) 序列（模块级缓存）。"""
+    global _JIAZI_CACHE
+    if _JIAZI_CACHE is None:
+        gans, zhis = "甲乙丙丁戊己庚辛壬癸", "子丑寅卯辰巳午未申酉戌亥"
+        _JIAZI_CACHE = [(gans[i % 10], zhis[i % 12]) for i in range(60)]
+    return _JIAZI_CACHE
+
+
+def _daily_load(d_gan: str, d_zhi: str) -> dict:
+    """流日「天干 + 地支藏干」折成五行供输量 {五行: 权重}。"""
+    load = {GAN_WUXING[d_gan]: 1.0}
+    for cg, r in ZHI_CANGGAN.get(d_zhi, []):
+        wx = GAN_WUXING[cg]
+        load[wx] = load.get(wx, 0.0) + r
+    return load
+
+
+def _xi_supply(load: dict, xi, ji) -> float:
+    """把五行供输按「喜用 +／忌神 −」折成契合度，并按「均匀日」期望去偏。
+
+    ⚠ 去偏原因：身强有 3 个喜用（官杀/食伤/财）而身弱只有 2 个（印/比劫），
+    若直接累计，**身强命盘会因「喜用更多」而系统性高出约 6 分**，故减掉这层
+    与命理无关的偏置，使身强 / 身弱两种命盘的分布可比。
+    """
+    ys = 0.0
+    for e, v in load.items():
+        if e in xi:
+            ys += v
+        elif e in ji:
+            ys -= v
+    return ys - sum(load.values()) * (len(xi) - len(ji)) / 5.0
+
+
+def _gan_zhi_terms(pillars, d_gan: str, d_zhi: str):
+    """逐柱比对「流日干支」与四柱：返回 (地支项, 天干项)（已各自封顶）。"""
+    zhi_term, gan_term = 0.0, 0.0
+    d_wx = GAN_WUXING.get(d_gan)
+    for i, p in enumerate(pillars):
+        if not p or len(p) < 2:
+            continue
+        zw, gw = _ZHI_POS_W.get(i, 0.8), _GAN_POS_W.get(i, 0.7)
+        uz, ug = p[-1], p[0]
+        if LIU_HE.get(uz) == d_zhi or LIU_HE.get(d_zhi) == uz:
+            zhi_term += 5.0 * zw
+        if CHONG.get(uz) == d_zhi:
+            zhi_term -= 7.0 * zw
+        if (uz, d_zhi) in HAI or (d_zhi, uz) in HAI:
+            zhi_term -= 3.5 * zw
+        if (uz, d_zhi) in ZHI_XING_PAIRS or (d_zhi, uz) in ZHI_XING_PAIRS:
+            zhi_term -= 3.5 * zw
+        if next((g for g in SAN_HE_GROUPS if uz in g and d_zhi in g), None):
+            zhi_term += 4.0 * zw
+        if i == 2:                                        # 日主本身与流日干的关系
+            if GAN_HE.get(ug) == d_gan:
+                gan_term += 5.0
+            elif (ug, d_gan) in GAN_CHONG_PAIRS:
+                gan_term -= 5.0
+            elif GAN_WUXING[ug] == d_wx:
+                gan_term += 2.0
+        else:
+            if GAN_HE.get(ug) == d_gan:
+                gan_term += 3.5 * gw
+            elif (ug, d_gan) in GAN_CHONG_PAIRS:
+                gan_term -= 3.5 * gw
+            elif GAN_WUXING[ug] == d_wx:
+                gan_term += 1.2 * gw
+    return (max(-14.0, min(14.0, zhi_term)), max(-9.0, min(9.0, gan_term)))
+
+
+def refine_baseline(pillars, prof) -> float:
+    """本命盘「个人化修正」在 60 甲子均匀分布下的期望值（模块级缓存）。
+
+    六合(1/12) + 三合(3/12) 的命中率高于 六冲(1/12) + 六害(1/12)，且 +5/+4 与
+    −7/−3.5 的量级不足以抵消 → 若直接累计，**每张命盘都会白拿约 2~3 分**。
+    减去此期望后个人化项年均归零，整体口径才中性。
+    """
+    key = tuple(pillars) + (round(prof["ratio"], 4),)
+    hit = _REFINE_BASELINE_CACHE.get(key)
+    if hit is not None:
+        return hit
+    xi, ji = prof["xi"], prof["ji"]
+    ys_w = 0.75 + min(1.0, abs(prof["ratio"] - 0.5) * 2.0) * 0.4
+    tot = 0.0
+    for d_gan, d_zhi in _jiazi_pairs():
+        load = _daily_load(d_gan, d_zhi)
+        zt, gt = _gan_zhi_terms(pillars, d_gan, d_zhi)
+        tot += _xi_supply(load, xi, ji) * 9.0 * ys_w + zt * 0.9 + gt
+    val = tot / 60.0
+    _REFINE_BASELINE_CACHE[key] = val
+    return val
 
 
 def compute_eightchar(year, month, day, hour=None, lunar_mode=False):
@@ -660,16 +871,27 @@ def compute_eightchar(year, month, day, hour=None, lunar_mode=False):
 
 
 def bazi_day_report(bazi: dict, info: dict):
-    """用户八字 vs 当日干支的推演报告（运势带强化用）。
+    """用户八字 vs 当日干支的推演（**子平法专业评分**，v1.9.16）。
 
-    :return: {"tags": [...], "score": int, "text": 一行摘要, "tips": [...],
-              "shengxiao": 八字年支生肖} 或 None（八字无效）
+    v1.9.16 改用「生肖分锚定 + 个人化修正」口径（用户指定）：
+    **个人分 = 本命八字生肖在本日的生肖分 ± 10 分以内**，修正量来自子平法推演。
+
+      ① **日主强弱**：四柱累计五行力量（天干按位置加权、地支按**藏干本气/中气/余气**
+         比例折算，**月支权重最高 = 得令**）→ 帮身 vs 耗身 → 身强 / 身弱。
+      ② **喜用神 / 忌神**：扶抑法 —— 身强喜克泄耗（官杀/食伤/财），身弱喜生扶（印/比劫）。
+      ③ **流日契合度**：把流日「天干 + 地支藏干」折成对喜 / 忌的供输（**主项**），
+         再在四柱上**逐柱加权**评定 合 / 冲 / 刑 / 害 / 三合 与天干五合相冲（次项）。
+      ④ **锚定生肖分**：以 `analyze_zodiac_day(本命生肖)` 的生肖分为基准，叠加 ③ 的
+         个人化项（已按 60 甲子期望去结构偏置）并经 `tanh` 压到 ±10 以内。
+
+    :return: {"tags","score","text","tips","shengxiao","profile"} 或 None（八字无效）
     """
     pillars = (bazi or {}).get("pillars") or []
     if len(pillars) < 3 or not pillars[2] or len(pillars[2]) < 2:
         return None
-    u_gan, u_zhi = pillars[2][0], pillars[2][-1]
-    u_wx = GAN_WUXING.get(u_gan)
+    prof = day_master_profile(pillars)              # ① + ② 子平法底座
+    u_gan, u_zhi = prof["ri_gan"], pillars[2][-1]
+    u_wx = prof["ri_wx"]
     d_gan = info["day_ganzhi"][0]
     d_zhi = info["day_zhi"]
     d_wx = GAN_WUXING.get(d_gan)
@@ -732,16 +954,52 @@ def bazi_day_report(bazi: dict, info: dict):
         tags.append("平")
         tips.append("八字与今日干支无刑合冲害，平常心度过，按部就班即可")
 
-    adj = sum(_BAZI_ADJ.get(t, 0) for t in tags)
-    # v1.9.9 重标定：原式 `fortune_score*0.5 + 50 + adj` 的**固定 +50 偏移**使
-    # adj=0 时得分已 ≈80（当日基础分中位 60），加上正向标签偏多，全年 64% 的天数
-    # 都 ≥80、中位 83，且换任何出生日期都一样（实测 8 个八字中位 82~83）——
-    # 用户反馈「八字输入后分数普遍比较高」，确认为**公式标定偏移**，非排盘错误
-    # （四柱经 lunar_python 核验正确）也非命盘特性。
-    # 改为 0.6*f + 30 + adj：中位 69 / 均值 68.3 / 范围 34..97，仍保留八字比
-    # 生肖路径（f + adj，中位 64）更亮眼的「强化」定位，但不再人人 80+。
-    score = max(5, min(98, int(info["fortune_score"] * 0.6 + 30 + adj)))
-    wx_txt = "（%s命）" % u_wx if u_wx else ""
-    text = "日主%s%s ｜ %s" % (pillars[2], wx_txt, "、".join(tags[:4]))
+    # ---------- ③a 流日五行对「喜 / 忌」的供输（主项） ----------
+    load = _daily_load(d_gan, d_zhi)                       # 流日天干 + 地支藏干
+    xi, ji = prof["xi"], prof["ji"]
+    ys_raw = 0.0
+    for e, v in load.items():
+        if e in xi:
+            ys_raw += v
+        elif e in ji:
+            ys_raw -= v
+    if ys_raw > 0.05:                   # 判定「得助 / 受制」用**原始**供输
+        tags.insert(0, "用神得助")
+        tips.append("今日%s之气助你的喜用（%s），气场顺遂，宜主动办事、把握机会"
+                    % (d_gan + d_zhi, "".join(xi)))
+    elif ys_raw < -0.05:
+        tags.insert(0, "用神受制")
+        tips.append("今日%s之气偏助忌神（%s），易有掣肘，宜守成、少做重大决策"
+                    % (d_gan + d_zhi, "".join(ji)))
+    ys = _xi_supply(load, xi, ji)       # 去偏后的契合度（身强 3 喜用 / 身弱 2 喜用已配平）
+    # 身强 / 身弱越极端，用神越关键 → 权重 0.75 ~ 1.15
+    ys_w = 0.75 + min(1.0, abs(prof["ratio"] - 0.5) * 2.0) * 0.4
+    if len(tags) > 1:                                      # 用神标签已入场则摘掉无信息的「平」
+        tags = [t for t in tags if t != "平"]
+
+    # ---------- ③b 四柱逐柱加权：地支合冲刑害三合 / 天干五合相冲 ----------
+    zhi_term, gan_term = _gan_zhi_terms(pillars, d_gan, d_zhi)
+
+    # ---------- 流日十神（文案） ----------
+    ss = shishen(u_gan, d_gan)
+    tips.append("今日%s，对你的日主%s是「%s」" % (d_gan, u_gan, ss))
+
+    # ---------- ④ 汇总：以「本命生肖分」为锚，个人化修正限定在 ±10 以内 ----------
+    # v1.9.16（用户口径）：个人分 = 本命八字生肖在本日的生肖分 ＋ 个人化修正；
+    # 修正项 = 用神五行契合 ＋ 逐柱干支关系，剪掉结构性正偏后经 tanh 压到 ±10 开区间。
+    # 于是既有个人化差异，又保证与生肖分同量纲、整体中性、不偏离生肖分超过 10 分。
+    anchor = info.get("fortune_score", 55)
+    if y_sx:
+        zrep = analyze_zodiac_day(info, y_sx)
+        if zrep and isinstance(zrep.get("score"), int):
+            anchor = zrep["score"]
+    raw = ys * 9.0 * ys_w + zhi_term * 0.9 + gan_term - refine_baseline(pillars, prof)
+    refine = 10.0 * math.tanh(raw / 12.0)
+    score = max(5, min(98, int(round(anchor + refine))))
+
+    strong_txt = "身强" if prof["strong"] else "身弱"
+    wx_txt = ("%s命·%s" % (u_wx, strong_txt)) if u_wx else strong_txt
+    text = "日主%s ｜ %s ｜ 今日%s·%s ｜ %s" % (
+        pillars[2], wx_txt, d_gan + d_zhi, ss, "、".join(tags[:2]))
     return {"tags": tags, "score": score, "text": text, "tips": tips,
-            "shengxiao": y_sx or ""}
+            "shengxiao": y_sx or "", "profile": prof}
