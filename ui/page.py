@@ -3,7 +3,8 @@
 import os
 from datetime import date, datetime
 
-from PySide6.QtCore import QPoint, QRect, QRectF, Qt, QEvent, QTimer, Signal
+from PySide6.QtCore import (QPoint, QRect, QRectF, Qt, QEvent, QTimer,
+                            Signal)
 from PySide6.QtGui import (QBrush, QColor, QCursor, QFont, QFontMetricsF,
                            QLinearGradient, QPainter, QPen)
 from PySide6.QtWidgets import (QApplication, QComboBox, QPushButton, QSlider,
@@ -12,12 +13,14 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QPushButton, QSlider,
 from calendar_app import fonts as calendar_app_fonts
 from calendar_app.engine import (get_day_info, SHENGXIAO_LIST, SHENGXIAO_2CHAR,
                                  ANIMAL_TO_2CHAR)
+from calendar_app.gua import gua_tip
+from calendar_app.xiu28 import xiu_full_name
 from calendar_app import version as VER
 
 from ui.theme import (COLOR_CHIPS, _font, _lf_asset, _painter_shear, _paper_pixmap,
                       _pix_cached, _pix_scaled, _tone_of, palette_for,
-                      use_builtin_fonts, EN_FONT, IMG_BAGUA, INK, NUM_FONT,
-                      SHEAR, ZH_FONT, ZH_SONG, ZH_WISDOM, _ZODIAC_DIR)
+                      use_builtin_fonts, xiu_pixmap, EN_FONT, IMG_BAGUA, INK,
+                      NUM_FONT, SHEAR, ZH_FONT, ZH_SONG, ZH_WISDOM, _ZODIAC_DIR)
 
 
 class CalendarPage(QWidget):
@@ -76,6 +79,23 @@ class CalendarPage(QWidget):
     COPYRIGHT_Y = 762
     TAB_MONTH_RECT = QRect(148, TAB_Y, TAB_W, TAB_H)
     TAB_DAY_RECT = QRect(267, TAB_Y, TAB_W, TAB_H)
+    # v1.9.17：分数区右端「今日卦象」方框 —— 与左端「吉/平/凶」方框 (30,484,52,52)
+    # 左右对称（用户规格「在平吉对称的红框区域加上今日卦象对应的卦图」）。
+    # 悬停命中直接用它，见 mouseMoveEvent / _show_gua_tip。
+    GUA_SIZE = 52
+    GUA_RECT = QRect(PAGE_W - 30 - GUA_SIZE, 484, GUA_SIZE, GUA_SIZE)
+    # v1.9.20：框内卦画的整体缩放系数（用户反馈「框里面的卦象 缩小到 90%」）。
+    # 只作用于卦画本体（条高/条间距/左右内缩/阴爻中缝），方框尺寸不动。
+    # v1.9.21：用户反馈「卦象图再缩小 90%」→ 0.9 × 0.9 = **0.81**
+    # （卦画 38×44 → 30.8×35.6）。
+    GUA_SCALE = 0.81
+    # v1.9.22：右下「颜色」卡片右侧的**今日二十八宿星图**（用户要求「在红框处加入
+    # 当日对应 28 星宿图」）。该矩形即用户标注红框的量测位置（页面 410..487 / 584..639），
+    # 右缘与下缘对齐「颜色」卡片内缘，与左侧三行色名（最宽止于 x≈384）互不重叠。
+    XIU_RECT = QRect(410, 584, 77, 55)
+    # v1.9.23 曾用 `XIU_SCALE = 1.5` 放大自绘线稿；**v1.9.24 起改用用户提供的
+    # 300×300 古刻本 PNG 贴图**（见 `_paint_xiu`），改为「裁到墨迹 + 等比缩放进图形区
+    # 77×49」，已是该区域能给出的最大尺寸，故该缩放旋钮已退役、不再使用。
 
     month_toggle_requested = Signal()
     day_toggle_requested = Signal()
@@ -97,6 +117,12 @@ class CalendarPage(QWidget):
         self._dwell_timer.setInterval(350)
         self._dwell_timer.setSingleShot(True)
         self._dwell_timer.timeout.connect(self._show_advice_tip)
+        # v1.9.17：今日卦象方框悬停 → 弹出卦象解释（停留 200ms，防扫过误弹）
+        self._hover_gua = False
+        self._gua_dwell_timer = QTimer(self)
+        self._gua_dwell_timer.setInterval(200)
+        self._gua_dwell_timer.setSingleShot(True)
+        self._gua_dwell_timer.timeout.connect(self._show_gua_tip)
         # 生肖框悬停弹层：150ms 停留（防止扫过顶栏时误弹）
         self._zx_hover_timer = QTimer(self)
         self._zx_hover_timer.setInterval(150)
@@ -359,11 +385,21 @@ class CalendarPage(QWidget):
                 self._dwell_timer.start()    # 停留 350ms 后再显示完整内容
             else:
                 self._dwell_timer.stop()
+        # v1.9.17：今日卦象方框 —— 同样「悬停停留后弹出解释」
+        on_gua = self.GUA_RECT.contains(hx, hy) and bool(self.info.get("gua"))
+        if on_gua != self._hover_gua:
+            self._hover_gua = on_gua
+            QToolTip.hideText()
+            if on_gua:
+                self._gua_dwell_timer.start()
+            else:
+                self._gua_dwell_timer.stop()
         hand = (self.TAB_MONTH_RECT.contains(hx, hy) or
                 self.TAB_DAY_RECT.contains(hx, hy) or
                 self.CENTER_DATE_RECT.contains(hx, hy) or
                 self.TITLE_RECT.contains(hx, hy) or
-                hit_key is not None)         # 卡片也给出手型光标，提示可悬停
+                hit_key is not None or           # 卡片也给出手型光标，提示可悬停
+                on_gua)                          # 卦象方框同上
         self.setCursor(Qt.PointingHandCursor if hand else Qt.ArrowCursor)
         super().mouseMoveEvent(ev)
 
@@ -374,6 +410,8 @@ class CalendarPage(QWidget):
     def leaveEvent(self, ev):
         self._hover_advice_key = None
         self._dwell_timer.stop()
+        self._hover_gua = False
+        self._gua_dwell_timer.stop()
         QToolTip.hideText()
         self.unsetCursor()
         super().leaveEvent(ev)
@@ -567,6 +605,9 @@ class CalendarPage(QWidget):
         right = "节气 %s" % info["jieqi"]
         if info["holiday"]:
             right = "法定假日 · %s" % info["holiday"]
+        # v1.9.18：调休上班日（周末上班）→ 标注「调休上班」并保持绿色主题
+        elif info.get("workday"):
+            right = "调休上班（周末）"
         p.drawText(QRect(34, 100, 210, 18), Qt.AlignLeft | Qt.AlignVCenter, left)
         p.drawText(QRect(276, 100, 210, 18), Qt.AlignRight | Qt.AlignVCenter, right)
         # 中：今日成语（v1.8.9）——分数取「生肖分优先，未选生肖用本日分」；
@@ -840,6 +881,11 @@ class CalendarPage(QWidget):
         info = self.info
         main, dark = self.P["main"], self.P["dark"]
         y, h = 484, 52
+        # v1.9.25：用户反馈「分数 和 本日运势 偏高，向下移动 5px」——
+        # 只下移**分数**与**「本日运势」行**两处文字；左端「吉/平/凶」方框与右端
+        # 「今日卦象」方框保持位置不动。下移后分数墨迹 490..509、本日运势墨迹
+        # 494..506，与下方值神行（墨迹 517..528）仍留 ≥8 行空隙。
+        dy = 5
         p.setPen(QPen(main, 2))
         p.setBrush(self.P["stamp_bg"])
         p.drawRect(30, y, 52, h)                       # 吉/平/凶 正方形框
@@ -848,12 +894,21 @@ class CalendarPage(QWidget):
         p.drawText(QRect(30, y, 52, h), Qt.AlignCenter, info["fortune_grade"])
         p.setFont(_font(22, NUM_FONT, QFont.Black))
         p.setPen(QPen(main))
-        p.drawText(QRect(94, y - 2, 84, 28), Qt.AlignLeft | Qt.AlignVCenter,
-                   "%d 分" % info["fortune_score"])
+        score_txt = "%d 分" % info["fortune_score"]
+        p.drawText(QRect(94, y - 4 + dy, 84, 26), Qt.AlignLeft | Qt.AlignVCenter,
+                   score_txt)
         # 本日生肖紧跟分数之后（吉/平/凶框保持方正不动）
         # 已录入八字时细化为「本日运势」（八字推演口径，v1.9.3）
+        # v1.9.17：右端让位给「今日卦象」方框，可用宽度随之收窄。
+        # v1.9.19：原 `elide` 截断会把长文案切掉尾巴（截成「（81…」），改为缩排自适应，
+        # 保证整条完整可读。
+        # v1.9.20：用户反馈「本日运势 正常情况下 左侧留白太多」。v1.9.19 的
+        # `AlignHCenter` 在文案偏短时会额外向内缩进（实测短文案缩进 ~30px，加上分数列
+        # 预留共 ~63px 空白）；v1.9.20 改为**紧跟分数之后**（分数实际墨迹宽 + 12px），
+        # 左留白从 ~63px 收到 ~15px。缩排自适应保留 —— 可用宽由 248px 增至 ~267px，
+        # 多数日子反而回到 14px 原号。
+        z_x = 94 + int(p.fontMetrics().horizontalAdvance(score_txt)) + 12
         rep = self.zodiac_report
-        p.setFont(_font(14, ZH_FONT, QFont.Black))
         p.setPen(QPen(dark))
         if rep:
             label = "本日运势" if rep.get("bazi_text") else "本日生肖"
@@ -865,14 +920,139 @@ class CalendarPage(QWidget):
                 " · ".join(rep["tags"]), rep["score"])
         else:
             ztxt = "在页顶选择你的生肖，查看本日运势 →"
-        p.drawText(QRect(182, y + 2, 280, 22), Qt.AlignLeft | Qt.AlignVCenter, ztxt)
-        p.setFont(_font(12, ZH_FONT))
-        fm = p.fontMetrics()
+        z_w = self.GUA_RECT.left() - 8 - z_x
+        self._draw_fit_line(p, ztxt, QRect(z_x, y + dy, z_w, 22), 14, ZH_FONT,
+                            QFont.Black, Qt.AlignLeft)
+        # 值神 / 神煞 / 吉凶评语（v1.9.19）：**恒定一行，不再折行**。
+        # v1.9.17 曾「一行放不下则折成两行」；用户 v1.9.19 反馈：
+        # 「值神还是不用分两行了，保持一行显示，如果太长显示不全则自动缩小字体间隔」
+        # ——改为单行缩排自适应（字号 12 → 11 并按需收紧字距），行带高度固定
+        # 2×15px 不变，单行仍在带内垂直居中（沿用 v1.9.18 的行高口径）。
         tail = "值神%s·%s｜吉神%d 凶煞%d ｜ %s" % (
             info["tianshen_type"], info["tianshen"],
             len(info["jishen"]), len(info["xiongsha"]), info["fortune_tip"])
-        p.drawText(QRect(94, y + 27, 396, 22), Qt.AlignLeft | Qt.AlignVCenter,
-                   fm.elidedText(tail, Qt.ElideRight, 396))
+        avail = self.GUA_RECT.left() - 8 - 94
+        row_h, band_h = 15, 2 * 15
+        block_top = y + 24 + (band_h - row_h) // 2
+        self._draw_fit_line(p, tail, QRect(94, block_top, avail, row_h), 12,
+                            ZH_FONT, QFont.Normal, Qt.AlignLeft)
+        # 右端：今日卦象（与左端吉/平/凶框左右对称）
+        self._paint_gua(p)
+
+    # ---- v1.9.19：单行「缩排自适应」（fit-to-width） ----
+    # 用户反馈：「值神还是不用分两行了，保持一行显示，如果太长显示不全则自动
+    # 缩小字体间隔」「本日运势 保持整体居中显示」。两行文字都必须是**恒定一行**，
+    # 超宽时靠缩排消化，绝不折行、尽量不省略。
+    FIT_FLOOR_GAP = 2          # 字号「舒适下限」= 基准字号 − 该值（先保可读性）
+    FIT_MIN_SIZE = 9           # 绝对字号下限（再小已不可读，改走省略号）
+    FIT_MIN_SPACING = -1.2     # 字距下限（px，负值 = 收紧）
+    FIT_CACHE = {}             # (text, width, size, families, weight) → (字号, 字距) | None
+
+    @classmethod
+    def _fit_size(cls, text, width, size, families, weight=QFont.Normal):
+        """求「让整条文字完整落在一行内」的 (字号, 字距)；无解返回 None。
+
+        候选按**视觉密度代价**排序后逐个试算，代价越小越优先：
+            cost = (基准字号 − 字号) × 1.0 + |字距| × 2.0
+        即「缩 1px 字号 ≈ 收 2px 字距」。这样同样能放下时，优先保住大字号、
+        只在必要时轻微收字距，而不会为了不收字距一路把字号缩到最小。
+        例：12px/374px 的评语在 336px 区里，选中 **(11px, −0.4px)** ——
+        而非纯缩字号的 10px，也不是硬收 −1.2px 的 12px。
+
+        搜索范围：字号 size → max(size−FIT_FLOOR_GAP, FIT_MIN_SIZE)；
+        字距 0 → FIT_MIN_SPACING。返回 None 即连最紧一档都超宽，调用方回退
+        `elidedText`。
+
+        结果必须缓存：paintEvent 每帧都会调，未命中时一次搜索要构造二十余个
+        `QFontMetricsF`，不缓存会拖垮节日高光 / 悬停重绘。
+        """
+        key = (text, width, size, id(families), int(weight))
+        if key in cls.FIT_CACHE:
+            return cls.FIT_CACHE[key]
+        floor = max(size - cls.FIT_FLOOR_GAP, cls.FIT_MIN_SIZE)
+        cands = []
+        for fs in range(floor, size + 1):
+            cands.append((fs, 0.0))
+            sp = -0.2
+            while sp >= cls.FIT_MIN_SPACING - 1e-9:
+                cands.append((fs, round(sp, 1)))
+                sp -= 0.2
+        cands.sort(key=lambda c: ((size - c[0]) + 2.0 * abs(c[1]), -c[0], -c[1]))
+        res = None
+        for fs, sp2 in cands:
+            f = _font(fs, families, weight)
+            if sp2:
+                f.setLetterSpacing(QFont.AbsoluteSpacing, sp2)
+            if QFontMetricsF(f).horizontalAdvance(text) <= width:
+                res = (fs, sp2)
+                break
+        if len(cls.FIT_CACHE) > 600:        # 只防无界增长，不必淘汰策略
+            cls.FIT_CACHE.clear()
+        cls.FIT_CACHE[key] = res
+        return res
+
+    def _draw_fit_line(self, p, text, rect, size, families, weight=QFont.Normal,
+                       align=Qt.AlignLeft):
+        """在 rect 内绘制**恒定一行**的文字：超宽走 `_fit_size` 缩排，绝不折行。
+
+        v1.9.19 起用于「本日运势」与「值神」两行（见 `_paint_fortune`）。
+        缩排也放不下时退化为省略号；rect 右缘已预留到卦象框左缘 8px，即使
+        墨迹溢出 1~2px 也不会压到卦象方框。
+        """
+        fit = self._fit_size(text, rect.width(), size, families, weight)
+        if fit is None:
+            p.setFont(_font(size, families, weight))
+            p.drawText(rect, align | Qt.AlignVCenter,
+                       p.fontMetrics().elidedText(text, Qt.ElideRight,
+                                                  rect.width()))
+            return
+        fs, spacing = fit
+        f = _font(fs, families, weight)
+        if spacing:
+            f.setLetterSpacing(QFont.AbsoluteSpacing, spacing)
+        p.setFont(f)
+        p.drawText(rect, align | Qt.AlignVCenter, text)
+
+    def _paint_gua(self, p):
+        """分数区右端「今日卦象」方框：**只画六爻卦画**（卦名等文字走悬停提示）。
+
+        v1.9.18：用户反馈「只需要显示卦象，字的话放在悬停界面里就行」——去掉框内卦名，
+        六爻在框内**垂直居中**并略微加粗（bar 3→4px）。
+        v1.9.20：用户反馈「框里面的卦象 缩小到 90%」——引入 `GUA_SCALE = 0.9`，
+        条高 / 条间距 / 左右内缩 / 阴爻中缝**整体等比缩到 0.9**（38×44 → 34.2×39.6），
+        仍然在框内**双向居中**。等比缩放后条宽高均为小数，故改用 `QRectF` 绘制
+        （`paintEvent` 已开 `Antialiasing`，边缘平滑）。
+        v1.9.21：用户反馈「卦象图再缩小 90%」→ `GUA_SCALE = 0.81`（38×44 → 30.8×35.6）。
+        六爻**自下而上**绘制（`gua["lines"][0]` 画在最下）：阳爻整条、阴爻中断。
+        完整解释（卦名 / 上下卦 / 简释 / 起卦依据）由鼠标悬停触发
+        （mouseMoveEvent 命中 `GUA_RECT` → `_show_gua_tip`）。
+        """
+        gua = self.info.get("gua")
+        r = self.GUA_RECT
+        main = self.P["main"]
+        p.setPen(QPen(main, 2))
+        p.setBrush(self.P["stamp_bg"])
+        p.drawRect(r)
+        if not gua:
+            return
+        lines = gua["lines"]
+        sc = self.GUA_SCALE                            # 0.9：整体等比缩小
+        bar_h, gap = 4 * sc, 4 * sc                    # 100% 时 4 / 4
+        yin_gap = 6 * sc                               # 阴爻中缝（100% 时 6）
+        inner_w = (r.width() - 14) * sc
+        total = len(lines) * bar_h + (len(lines) - 1) * gap
+        bx = r.left() + (r.width() - inner_w) / 2.0    # 框内水平居中
+        top = r.top() + (r.height() - total) / 2.0     # 框内垂直居中
+        p.setPen(Qt.NoPen)
+        p.setBrush(main)
+        for i, yang in enumerate(lines):               # i=0 为初爻（最下）
+            yy = top + (len(lines) - 1 - i) * (bar_h + gap)
+            if yang:
+                p.drawRect(QRectF(bx, yy, inner_w, bar_h))
+            else:
+                seg = (inner_w - yin_gap) / 2.0
+                p.drawRect(QRectF(bx, yy, seg, bar_h))
+                p.drawRect(QRectF(bx + inner_w - seg, yy, seg, bar_h))
 
     def _paint_zodiac(self, p):
         rep = self.zodiac_report
@@ -944,17 +1124,62 @@ class CalendarPage(QWidget):
         rows = [("大吉", colors.get("大吉", "—"), QFont.Black),
                 ("次吉", colors.get("次吉", "—"), QFont.Black),
                 ("不宜", colors.get("不宜", "—"), QFont.Normal)]
+        # v1.9.18：色点与字号缩小，行高与左栏「吉时」时辰行**完全一致**
+        # （用户反馈「颜色字号缩小和前面的时辰高度保持一致」）：
+        # 首行基线对齐（y+15）、行距同为 16、字号同 11、圆点 10→8 并随行垂直居中。
         for i, (tag, names, weight) in enumerate(rows):
-            ry = y + 14 + i * 18
+            ry = y + 15 + i * 16
             first = names.split("、")[0] if names else ""
             chip = QColor(COLOR_CHIPS.get(first, "#cccccc"))
             p.setBrush(chip)
             p.setPen(QPen(QColor("#00000040"), 1))
-            p.drawEllipse(280, ry + 3, 10, 10)
+            p.drawEllipse(281, ry + 4, 8, 8)
             p.setPen(QPen(dark))
-            p.setFont(_font(12, ZH_FONT, weight))
-            p.drawText(QRect(298, ry, 180, 17), Qt.AlignLeft | Qt.AlignVCenter,
+            p.setFont(_font(11, ZH_FONT, weight))
+            p.drawText(QRect(296, ry, 182, 16), Qt.AlignLeft | Qt.AlignVCenter,
                        "%s %s" % (tag, names))
+        # v1.9.22：卡片右侧的今日二十八宿星图
+        self._paint_xiu(p)
+
+    def _paint_xiu(self, p):
+        """「颜色」卡片右侧的**今日二十八宿星图**（v1.9.22 新增 / v1.9.23 去框放大 /
+        v1.9.24 改用用户提供的古刻本素材）。
+
+        沿革：
+          · v1.9.22 用户「在红框处加入当日对应 28 星宿图」——红框量测为页面
+            (410,584)-(487,639)，即「颜色」卡右侧原本的留白；
+          · v1.9.23 用户「删除星宿外部的框，图片放大到 150%」——去掉那圈圆角细框；
+          · v1.9.24 用户「星宿图用（项目根/二十八星宿）这个路径下的 png 图片」——
+            改用其自备的 300×300 古刻本 PNG（星点 + 连线 + **图上自带宿字与日文假名**），
+            按当前主题着色（红 / 绿），下方**仍保留中文三字宿名**（图上的字在小尺寸下
+            只是纹样，中文名才是可读信息）。
+
+        贴图而非矢量绘制的注意点：
+          · 素材每张的墨迹占比 / 位置都不同，`ui.theme.xiu_pixmap()` 会先**裁到墨迹包围盒**
+            再等比缩放进图形区，否则 28 天里星图大小会参差不齐；
+          · 着色走 `CompositionMode_SourceIn`（保留原 alpha），并带（路径 / 颜色 / 尺寸）
+            三级缓存 —— 本方法在 `paintEvent` 内每帧调用，**不得**在此读盘或缩放。
+        """
+        xiu = (self.info.get("xiu") or "").strip()
+        r = self.XIU_RECT
+        main, dark = self.P["main"], self.P["dark"]
+        # 图形区：卡片上框线墨迹(573..574)下留 2 行 → 577；宿名行矩形顶 626 上留 2 行 → 625。
+        # 即 49 行高、与 `XIU_RECT` 同宽（77），横向居中于格中心（与宿名同轴）。
+        box = QRect(r.left(), r.top() - 7, r.width(), 49)
+        pm = xiu_pixmap(xiu, main, box.width(), box.height())
+        if not pm.isNull():
+            p.drawPixmap(box.left() + (box.width() - pm.width()) // 2,
+                         box.top() + (box.height() - pm.height()) // 2, pm)
+
+        # 宿名（柳土獐 / 角木蛟 …），10px 黑体居中；矩形顶 r.bottom()-12，墨迹下缘距
+        # 卡片下框线 3 行（v1.9.23 起）
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(dark))
+        p.setFont(_font(10, ZH_FONT, QFont.Black))
+        p.drawText(QRect(r.left(), r.bottom() - 12, r.width(), 13),
+                   Qt.AlignCenter,
+                   xiu_full_name(xiu, self.info.get("xiu_zheng", ""),
+                                 self.info.get("xiu_animal", "")))
 
     def _advice_rects(self):
         """事业/感情/出行/财务 四张卡片的几何（与 _paint_advice 完全一致）。
@@ -979,6 +1204,14 @@ class CalendarPage(QWidget):
             return
         # 锚定到卡片矩形下方，避免遮住卡片本身
         QToolTip.showText(QCursor.pos(), full, self, self._hover_advice_rect)
+
+    def _show_gua_tip(self):
+        """悬停停留后，弹出「今日卦象」的完整解释（卦名 / 内外卦 / 简释）。"""
+        if not self._hover_gua:
+            return
+        text = gua_tip(self.info.get("gua"))
+        if text:
+            QToolTip.showText(QCursor.pos(), text, self, self.GUA_RECT)
 
     def _paint_advice(self, p):
         """事业 / 感情 / 出行 / 财务 分项建议。"""

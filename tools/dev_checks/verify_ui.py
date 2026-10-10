@@ -10,7 +10,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 sys.path.insert(0, _ROOT)
 os.chdir(_ROOT)
 
-from datetime import date
+from datetime import date, timedelta
 from PIL import Image
 from PySide6.QtCore import QRect, Qt
 from PySide6.QtWidgets import QApplication
@@ -36,7 +36,9 @@ win.show()
 page = win.page
 
 RED = date(2026, 9, 27)
-GREEN = date(2026, 10, 10)
+# v1.9.17：双休日也走红主题，故「绿日」基准日必须取**工作日**（原 10-10 是周六，
+# 现已转红 → 会污染「screenshot-green.png」与红/绿像素对照，改取 10-14 周三）。
+GREEN = date(2026, 10, 14)
 
 
 def setup(d):
@@ -212,8 +214,16 @@ ck("[5] 相位不同 → 数字区亮度不同（确有流光）", lo != hi, "v(
 
 ck("回归 法定假日 → 红", palette_for({"holiday": "国庆节"})["main"].name() == "#c62828")
 ck("回归 平日 → 绿", palette_for({})["main"].name() == "#1f9c3d")
+ck("回归 v1.9.17 双休日 → 红（与法定假日同色，但文案不标「法定假日」）",
+   palette_for({"weekend": True})["main"].name() == "#c62828"
+   and palette_for({"holiday": None, "weekend": False})["main"].name() == "#1f9c3d",
+   "用户反馈「让双休日也改为红色」")
+ck("回归 v1.9.18 调休上班日 → 绿（周末上班不放假）",
+   palette_for({"weekend": True, "workday": True})["main"].name() == "#1f9c3d"
+   and palette_for({"weekend": True, "workday": False})["main"].name() == "#c62828",
+   "用户反馈「今天按照国内是调休，虽然是周末但是是上班的，所以这个需要调整」")
 ck("回归 版本号 v%s / %s" % (APP_VERSION, BUILD_CODE),
-   APP_VERSION == "1.9.16" and BUILD_CODE == "2609300017", VERSION_TITLE)
+   APP_VERSION == "1.9.25" and BUILD_CODE == "2610100026", VERSION_TITLE)
 ck("回归 生肖水印素材齐备",
    all(os.path.exists(os.path.join(_ZODIAC_DIR, "%s（%s）.png" % (s, t)))
        for s in ("龙", "马") for t in ("红", "绿")))
@@ -738,7 +748,58 @@ def _embed_shots_to_readme():
 
 _embed_shots_to_readme()
 
-failed = [n for n, c, _ in R if not c]
+
+def _embed_xiu_shots():
+    """把二十八宿星图两张图以 base64 内嵌进 README 的「当日二十八宿星图」小节（v1.9.22）。
+
+    ⚠ 这两张图**不由本脚本生成**，而由 `tools/dev_checks/shot_xiu.py` 在**真实平台**渲染：
+      offscreen 插件不做字体回退，「壁水**獝**」的 獝（U+735D，宿名用字 62 个里唯一
+      不在内置字体子集内的字）在离屏会画成豆腐块。本函数只负责把已生成的图内嵌。
+    ⚠ 顺序：先跑 `shot_xiu.py` 出新图，再跑本脚本 —— 否则内嵌的是旧图（[10b] 会比对不一致）。
+    """
+    import re as _re2
+    import base64 as _b64
+    pairs = [("星图", "xiu-panel.png"), ("28 宿", "xiu-28-sheet.png")]
+    uris = {}
+    for alt, fn in pairs:
+        path = os.path.join("docs", "screenshots", fn)
+        if not os.path.exists(path):
+            print("⚠ 二十八宿星图缺失（先跑 tools/dev_checks/shot_xiu.py 生成），跳过内嵌:", fn)
+            return
+        uris[alt] = "data:image/png;base64," + _b64.b64encode(
+            open(path, "rb").read()).decode("ascii")
+    section = (
+        "## 🌌 当日二十八宿星图（v1.9.22 起 · v1.9.24 改用古刻本素材）\n\n"
+        "「颜色」卡右侧一格显示**当日值日星宿**：宿名 / 七曜 / 宿禽 / 吉凶 / 四象 / 方位\n"
+        "取自 `lunar_python`。星图采用**用户自备的 28 张古刻本 PNG**\n"
+        "（`二十八星宿/`，星点 + 连线 + 图上宿字与日文假名），按当前主题**红 / 绿着色**，\n"
+        "贴图前自动**裁到墨迹包围盒**再等比缩放，故 28 天里星图大小一致、不生参差；\n"
+        "下方**仍保留中文三字宿名**（图上小字只作纹样，中文名才是可读信息）。\n"
+        "v1.9.23 起星图**不再自绘外框**（本就在「颜色」卡片内，框套框冗余）。\n\n"
+        "| 「颜色」卡右侧的星图 | 2026-10-10 起 28 天逐日星图（一屏看全 28 宿） |\n"
+        "| :----: | :----: |\n"
+        "| ![星图](%s) | ![28 宿](%s) |\n\n"
+        "> 二十八宿 28 日一轮回，故连续 28 天恰好覆盖全部 28 宿（已实测）。\n"
+        "> ⚠ 「壁水**獝**」的 獝 (U+735D) 不在内置字体子集内（宿名用字 62 个里唯一缺口），\n"
+        "> 真机走系统字体回退、**离屏渲染会成豆腐块** —— 故本图由 `tools/dev_checks/shot_xiu.py` 在\n"
+        "> **真实平台**渲染（不要用 offscreen 重出这两张图）。"
+        % (uris["星图"], uris["28 宿"]))
+    src = open("README.md", encoding="utf-8").read()
+    # 标题行允许带后缀（如「（v1.9.22 起）」），否则整节定位失败 → 静默跳过内嵌
+    pat = _re2.compile(r"## 🌌 当日二十八宿星图[^\n]*\n.*?(?=\n---\n)", _re2.S)
+    if pat.search(src):
+        src = pat.sub(lambda _m: section, src, count=1)
+    else:
+        print("⚠ README 未找到「## 🌌 当日二十八宿星图」小节，跳过内嵌")
+        return
+    open("README.md", "w", encoding="utf-8").write(src)
+
+
+_embed_xiu_shots()
+
+# ⚠ v1.9.22 清理：此处原有一行 `failed = [n for n, c, _ in R if not c]`（v1.8.7 遗留），
+#   但它在文件末尾（汇总处）会被重新赋值、中间从无读取，属**死代码** —— 一旦有人在
+#   此之后新增断言并依赖它，失败会被静默吞掉。现已删除，`failed` 只在末尾计算一次。
 
 # ---- [10] README 截图交付物：渲染路径不得用 processEvents，且文件确实存在 ----
 # ⚠ v1.8.7 用户反馈「修复 README 中的软件截图」。两个问题：
@@ -795,6 +856,31 @@ _have_alts = all(("![" + a + "](data:image/png;base64,") in _readme
 ck("[10] README 四张截图已 base64 内嵌（非外链 / 非占位文字）",
    _b64_count >= 4 and _have_alts,
    "data URI=%d  alt齐=%s" % (_b64_count, _have_alts))
+
+# ---- [10b] v1.9.22：README 的「当日二十八宿星图」小节（两张图必须存在且已内嵌）----
+# ⚠ 这两张图由 `tools/dev_checks/shot_xiu.py` 在**真实平台**渲染（离屏下「壁水獝」的 獝 会是豆腐块），
+#   本脚本只负责内嵌；因此这里断言「文件存在 + README 里确实是 base64 内嵌 + 不陈旧」。
+_XIU_SHOTS = ("xiu-panel.png", "xiu-28-sheet.png")
+_xiu_missing = [s for s in _XIU_SHOTS
+                if not os.path.exists(os.path.join("docs", "screenshots", s))]
+ck("[10b] README 二十八宿星图两张文件齐备（由 tools/dev_checks/shot_xiu.py 真机渲染）",
+   not _xiu_missing,
+   "缺失=%s" % _xiu_missing if _xiu_missing else "2/2")
+ck("[10b] README 含「当日二十八宿星图」小节且两张图已 base64 内嵌",
+   "## 🌌 当日二十八宿星图" in _readme
+   and all(("![" + a + "](data:image/png;base64,") in _readme
+           for a in ("星图", "28 宿")),
+   "小节=%s" % ("## 🌌 当日二十八宿星图" in _readme))
+# 防陈旧：README 里内嵌的 base64 必须与磁盘上的当前文件一致（改图后忘了重跑内嵌会红）
+import base64 as _b64_10                                              # noqa: E402
+_stale = []
+for _alt, _fn in (("星图", "xiu-panel.png"), ("28 宿", "xiu-28-sheet.png")):
+    _uri = "data:image/png;base64," + _b64_10.b64encode(
+        open(os.path.join("docs", "screenshots", _fn), "rb").read()).decode("ascii")
+    if _uri not in _readme:
+        _stale.append(_alt)
+ck("[10b] README 内嵌的星图 base64 与磁盘文件一致（不陈旧）",
+   not _stale, "陈旧: %s" % (_stale or "无"))
 
 # ---- [11] 今日成语（v1.8.9）：分段映射 + 居中绘制 + 随主题红绿 ----
 # 用户需求：红框区域（年份行与巨大数字之间的居中空带）按今日分数显示成语，
@@ -1212,6 +1298,601 @@ ck("[21] ITaskbarList 即时增删接口在位（CLSID/IID + AddTab/DeleteTab）
 ck("[21] 真机探针 window_mode_probe.py 存在（任务栏两态实测）",
    os.path.exists(os.path.join(_ROOT, "tools", "dev_checks",
                                "window_mode_probe.py")))
+
+# ---- [22] v1.9.17：双休日红 + 今日卦象方框 + 值神行折行 ----
+# 用户反馈：「双休日也改为红色」「在平吉对称的红框区域加上今日卦象对应的卦图，
+#   鼠标移上去悬停会有卦象的解释」「如果值神行一行不够显示则变为两行」。
+from calendar_app import gua as _gua_mod
+from calendar_app.gua import daily_gua as _dg, gua_tip as _gt
+_wn = _eng.get_day_info(date(2026, 10, 17))          # 周六（普通周末）
+_wn2 = _eng.get_day_info(date(2026, 10, 11))         # 周日
+_wd = _eng.get_day_info(date(2026, 10, 12))          # 周一
+ck("[22] 周六 / 周日 weekend=True 且主题转红（周一仍绿）",
+   _wn["weekend"] and _wn2["weekend"] and not _wd["weekend"]
+   and palette_for(_wn)["main"].name() == "#c62828"
+   and palette_for(_wd)["main"].name() == "#1f9c3d",
+   "10-17 周六=%s / 10-12 周一=%s"
+   % (palette_for(_wn)["main"].name(), palette_for(_wd)["main"].name()))
+ck("[22] 双休日不冒充「法定假日」（holiday 仍为空）",
+   not _wn["holiday"] and not _wn2["holiday"], "%s / %s" % (_wn["holiday"], _wn2["holiday"]))
+# 卦象方框与左端吉/平/凶框左右对称、且比宜/忌框窄
+ck("[22] 卦象方框 GUA_RECT 与吉/平/凶框（30,484,52,52）左右对称",
+   CalendarPage.GUA_RECT.width() == 52 and CalendarPage.GUA_RECT.height() == 52
+   and CalendarPage.GUA_RECT.top() == 484
+   and CalendarPage.GUA_RECT.right() == CalendarPage.PAGE_W - 30 - 1,
+   "GRect=%s（右缘 %d = 页宽-30）"
+   % (CalendarPage.GUA_RECT, CalendarPage.GUA_RECT.right()))
+_src_pg = inspect.getsource(CalendarPage._paint_gua)
+ck("[22] _paint_gua 逐爻自下而上绘制（阳爻整条 / 阴爻中断）",
+   "for i, yang in enumerate(lines)" in _src_pg
+   and "(len(lines) - 1 - i)" in _src_pg
+   and "p.drawRect(QRectF(bx + inner_w - seg, yy, seg, bar_h))" in _src_pg,
+   "六爻画于方框内，卦名已移入悬停")
+ck("[22] 卦象方框已接入 paintEvent（_paint_fortune 内调用 _paint_gua）",
+   "_paint_gua(p)" in inspect.getsource(CalendarPage._paint_fortune))
+_src_mm = inspect.getsource(CalendarPage.mouseMoveEvent)
+ck("[22] 悬停 GUA_RECT → 停驻 200ms 弹卦象解释（QToolTip）",
+   "on_gua" in _src_mm and "self.GUA_RECT.contains" in _src_mm
+   and "_gua_dwell_timer" in _src_mm
+   and "QToolTip.showText" in inspect.getsource(CalendarPage._show_gua_tip))
+ck("[22] 悬停卦象时切换手型光标（on_gua 并入 hand 判定）",
+   "or on_gua" in _src_mm or "on_gua)" in _src_mm)
+ck("[22] 卦象解释含卦名 / 内外卦 / 简释 / 起卦依据",
+   all(k in _gt(_dg(_eng.get_day_info(date(2026, 10, 3))))
+       for k in ("卦（", "上", "下", "起卦")))
+# 值神行折行（v1.9.17）已在 v1.9.19 退役 → 改为**单行缩排**（校验见 [24] 组）
+ck("[22] 值神行折行逻辑已退役（_wrap_tail 删除，不再折两行）",
+   not hasattr(CalendarPage, "_wrap_tail")
+   and "值神还是不用分两行了" in inspect.getsource(CalendarPage._paint_fortune),
+   "用户 v1.9.19 反馈「值神还是不用分两行了，保持一行显示」")
+ck("[22] 旧起卦法（日干→上/日支→下，仅 32 卦）已退役，改梅花易数年月日式",
+   "GAN_ORDER.index(gz[0])" not in inspect.getsource(_dg)
+   and "lunar_month_num" in inspect.getsource(_dg)
+   and "梅花易数" in _gua_mod.__doc__)
+ck("[22] 卦象探针 probe_gua.py 存在（64 卦覆盖 / 六爻自洽 / 起卦复算）",
+   os.path.exists(os.path.join(_ROOT, "tools", "dev_checks", "probe_gua.py")))
+
+# ---- [23] v1.9.18：调休上班日 + 卦象框去字 + 值神居中 + 颜色行高 + 假期导入 ----
+from calendar_app import holidays as _HOL
+# ① 调休上班日（2026 依国办发明电〔2025〕7 号）
+_wd1 = _eng.get_day_info(date(2026, 10, 10))          # 周六调休上班
+ck("[23] 2026-10-10（周六调休）→ workday=True、周末但走绿主题",
+   _wd1["workday"] and _wd1["weekend"] and not _wd1["holiday"]
+   and palette_for(_wd1)["main"].name() == "#1f9c3d",
+   "用户反馈「今天按照国内是调休，虽然是周末但是是上班的」")
+ck("[23] 2026 调休上班日共 6 天（1/4 · 2/14 · 2/28 · 5/9 · 9/20 · 10/10）",
+   sorted(_HOL.BUILTIN_YEARS[2026]["workdays"]) ==
+   ["2026-01-04", "2026-02-14", "2026-02-28", "2026-05-09",
+    "2026-09-20", "2026-10-10"],
+   str(sorted(_HOL.BUILTIN_YEARS[2026]["workdays"])))
+ck("[23] 调休日不算法定假日（get_holiday 返回 None）",
+   _HOL.get_holiday(date(2026, 10, 10)) is None
+   and _HOL.get_holiday(date(2026, 10, 1)) == "国庆节")
+ck("[23] 春节区间已修正为 2/15–2/23（9 天，非旧表 2/16–2/22）",
+   _HOL.get_holiday(date(2026, 2, 15)) == "春节"
+   and _HOL.get_holiday(date(2026, 2, 23)) == "春节"
+   and _HOL.get_holiday(date(2026, 2, 24)) is None)
+_src_hd = inspect.getsource(CalendarPage._paint_header)
+ck("[23] 页头副行标注「调休上班（周末）」",
+   "调休上班（周末）" in _src_hd and 'info.get("workday")' in _src_hd)
+
+# ② 卦象框只留卦画（卦名移入悬停）
+_src_pg2 = inspect.getsource(CalendarPage._paint_gua)
+ck("[23] 卦象框不再绘制卦名（文字全部移入悬停 tooltip）",
+   'gua["name"]' not in _src_pg2 and "setFont" not in _src_pg2,
+   "用户反馈「只需要显示卦象，字的话放在悬停界面里就行」")
+ck("[23] 六爻在框内双向居中（宽高都按 /2 折算，v1.9.20 起为浮点）",
+   "(r.height() - total) / 2.0" in _src_pg2
+   and "(r.width() - inner_w) / 2.0" in _src_pg2, "不再贴顶贴左、留白四周对称")
+ck("[23] 卦名 / 上下卦 / 简释 / 起卦依据仍在 tooltip 文案里",
+   all(k in _gt(_dg(_eng.get_day_info(date(2026, 10, 10))))
+       for k in ("遁", "卦（", "上", "下", "起卦")))
+
+# ③ 值神单行时在两行带内垂直居中（v1.9.19 起恒为单行，公式不再按行数折算）
+_src_pf = inspect.getsource(CalendarPage._paint_fortune)
+ck("[23] 值神行高度居中（band_h − row_h 折算中点，不再按行数折算）",
+   "band_h" in _src_pf and "(band_h - row_h) // 2" in _src_pf
+   and "band_h - len(lines)" not in _src_pf,
+   "用户反馈「值神在一行的情况下就高度居中」")
+
+# ④ 颜色行高与吉时一致
+_src_hc = inspect.getsource(CalendarPage._paint_hours_colors)
+ck("[23] 颜色行改用与吉时相同的行距 16 / 字号 11 / 首行 y+15",
+   "ry = y + 15 + i * 16" in _src_hc and "_font(11, ZH_FONT, weight)" in _src_hc
+   and "col_w, row_h = 104, 16" in _src_hc,
+   "用户反馈「颜色字号缩小和前面的时辰高度保持一致」")
+ck("[23] 颜色圆点缩小到 8px 并随行垂直居中",
+   "drawEllipse(281, ry + 4, 8, 8)" in _src_hc and "drawEllipse(280, ry + 3, 10, 10)" not in _src_hc)
+
+# ⑤ 国定假日导入（关于本软件）
+_src_ab = inspect.getsource(MainWindow._about)
+ck("[23] 「关于本软件」含国定假日导入三键（下载模板 / 导入 / 恢复内置）",
+   all(k in _src_ab for k in ("下载假期模板", "导入假期安排", "恢复内置")))
+ck("[23] 导入后清缓存并按新表重算当日",
+   "_holiday_imported" in _src_ab and "HOL.reload()" in _src_ab
+   and "_set_date(self.page.info[" in _src_ab)
+ck("[23] holidays 模块提供 模板 / 导入 / 合并 接口",
+   all(hasattr(_HOL, n) for n in ("make_template", "import_holidays",
+                                  "merged_years", "get_holiday",
+                                  "is_makeup_workday", "clear_user_years",
+                                  "holidays_path")))
+import tempfile as _tf23
+_tpl23 = os.path.join(_tf23.mkdtemp(), "t.xlsx")
+_HOL.make_template(_tpl23)
+_imp23 = _HOL.import_holidays(_tpl23, dest=os.path.join(os.path.dirname(_tpl23),
+                                                        "h.json"))
+ck("[23] 模板可生成、可原样回导（放假 / 调休行数一致）",
+   _imp23["holiday_rows"] == 14 and _imp23["workday_rows"] == 6,
+   "模板回导：放假 %d 段 / 调休 %d 天 / 年份 %s"
+   % (_imp23["holiday_rows"], _imp23["workday_rows"], _imp23["years"]))
+ck("[23] 假日探针 probe_holidays.py 存在",
+   os.path.exists(os.path.join(_ROOT, "tools", "dev_checks", "probe_holidays.py")))
+
+# ---- [24] v1.9.19：本日运势行「整条完整 + 整体居中」+ 值神行单行缩排 ----
+# 用户反馈：「本日运势 保持整体居中显示」「值神还是不用分两行了，保持一行显示，
+#   如果太长显示不全则自动缩小字体间隔」。
+from PySide6.QtGui import QFont as _QF24, QFontMetricsF as _FMF24
+_src_fit = inspect.getsource(CalendarPage._fit_size)
+_src_dfl = inspect.getsource(CalendarPage._draw_fit_line)
+ck("[24] _fit_size 为 classmethod 且结果缓存（paintEvent 每帧都调）",
+   isinstance(inspect.getattr_static(CalendarPage, "_fit_size"), classmethod)
+   and "FIT_CACHE" in _src_fit and "len(cls.FIT_CACHE) > 600" in _src_fit,
+   "未命中一次要构造二十余个 QFontMetricsF，必须缓存")
+ck("[24] 缩排候选按「视觉密度代价」排序（缩 1px 字号 ≈ 收 2px 字距）",
+   "2.0 * abs(c[1])" in _src_fit and "FIT_FLOOR_GAP" in _src_fit
+   and "FIT_MIN_SPACING" in _src_fit)
+ck("[24] 字距走 QFont.AbsoluteSpacing（Qt 的 horizontalAdvance 会计入）",
+   "setLetterSpacing(QFont.AbsoluteSpacing" in _src_dfl
+   and "QFontMetricsF(f).horizontalAdvance(text) <= width" in _src_fit)
+ck("[24] 本日运势行与值神行均走 _draw_fit_line（恒定一行，无折行分支）",
+   _src_pf.count("self._draw_fit_line(") == 2 and "Qt.AlignLeft" in _src_pf)
+ck("[24] 本日运势行左对齐且不再有居中缩进（v1.9.20 用户反馈「左侧留白太多」）",
+   "Qt.AlignHCenter" not in _src_pf
+   and "z_x = 94 + int(p.fontMetrics().horizontalAdvance(score_txt)) + 12" in _src_pf,
+   "改为紧跟分数之后，左留白 63px → ~15px")
+# 366 天全量：值神行必须**天天**能排进一行，且缩放后实测不溢出
+_tx0 = 94
+_txw = CalendarPage.GUA_RECT.left() - 8 - _tx0
+_zx0 = 182
+_zxw = CalendarPage.GUA_RECT.left() - 8 - _zx0
+_bad_fit, _size_hist = [], {}
+for _i in range(366):
+    _inf = get_day_info(date(2026, 1, 1) + _td(days=_i))
+    _t = "值神%s·%s｜吉神%d 凶煞%d ｜ %s" % (
+        _inf["tianshen_type"], _inf["tianshen"],
+        len(_inf["jishen"]), len(_inf["xiongsha"]), _inf["fortune_tip"])
+    _fit = CalendarPage._fit_size(_t, _txw, 12, _zhf)
+    if _fit is None:
+        _bad_fit.append((_inf["date"], "none"))
+        continue
+    _f = _tf(_fit[0], _zhf)
+    if _fit[1]:
+        _f.setLetterSpacing(_QF24.AbsoluteSpacing, _fit[1])
+    if _FMF24(_f).horizontalAdvance(_t) > _txw:
+        _bad_fit.append((_inf["date"], "overflow"))
+    _size_hist[_fit[0]] = _size_hist.get(_fit[0], 0) + 1
+ck("[24] 366 天值神行全部排进一行、缩排后实测不溢出",
+   not _bad_fit, "异常 %d 天 %s；字号分布 %s（可用 %dpx）"
+   % (len(_bad_fit), _bad_fit[:3],
+      dict(sorted(_size_hist.items(), reverse=True)), _txw))
+ck("[24] 缩排克制：≥200 天仍用 12px 原号、无一天缩到 10px 以下",
+   _size_hist.get(12, 0) >= 200 and min(_size_hist) >= 10,
+   "12px %d 天 / 最小字号 %d / 分布 %s"
+   % (_size_hist.get(12, 0), min(_size_hist),
+      dict(sorted(_size_hist.items(), reverse=True))))
+ck("[24] _paint_fortune 已不再引用折行辅助（_wrap_tail 彻底移除）",
+   "_wrap_tail" not in _src_pf and not hasattr(CalendarPage, "_wrap_tail"))
+
+
+def _fortune_segs(d, rep):
+    """渲染一页，返回 (分数墨迹, 本日运势行分段, 值神行分段)，段为 (顶, 底, 左, 右)。
+
+    分数墨迹单列：v1.9.20 起「本日运势」要紧跟分数之后，故必须先量出分数的墨迹右缘，
+    再断言与文案首段左缘的间隙 —— 窗口取 x 88..158（文案左缘 ≥160，不会串味）。
+    """
+    setup(d)
+    page.zodiac_report = rep
+    page._sheen_t = 0.0
+    page.repaint()
+    img = page.grab().toImage()
+
+    def rows(x0, x1, y0, y1):
+        out = {}
+        for yy in range(y0, y1):
+            xs = [xx for xx in range(x0, x1)
+                  if img.pixelColor(xx, yy).lightness() < 140]
+            if xs:
+                out[yy] = (min(xs), max(xs))
+        return out
+
+    def split(rs):
+        ys = sorted(rs)
+        if not ys:
+            return []
+        groups, cur = [], [ys[0]]
+        for a, b in zip(ys, ys[1:]):
+            if b - a <= 2:
+                cur.append(b)
+            else:
+                groups.append(cur)
+                cur = [b]
+        groups.append(cur)
+        return [(g[0], g[-1], min(rs[y][0] for y in g), max(rs[y][1] for y in g))
+                for g in groups]
+
+    # 窗口切分：基准日 2026-10-15 分数 54（两位）墨迹止于 ~148，文案起于 ~162，
+    # 故 88..160 只含分数、161.. 只含文案；换基准日须重算这两个界。
+    # v1.9.25：分数 / 本日运势 行整体下移 5px → 两行墨迹下缘到 ~509，故行带自 480 放到
+    # 512（值神行墨迹起于 517，不会被串进上面两行）。
+    return (split(rows(88, 160, 480, 512)),                 # 分数「NN 分」
+            split(rows(161, _zx0 + _zxw + 6, 480, 512)),    # 本日运势行
+            split(rows(_tx0 - 4, _tx0 + _txw + 6, 512, 538)))
+
+
+# 短文案样本（未录入八字口径）——留白多少在像素上差别最明显
+_REP_PLAIN24 = {"name": "狗", "tags": ["三合", "天德"], "score": 92,
+                "tips": ["三合贵人"], "text": "三合贵人"}
+_ssegs, _zsegs, _tsegs = _fortune_segs(date(2026, 10, 15), _REP_PLAIN24)
+page.zodiac_report = None
+_gap = (_zsegs[0][2] - _ssegs[0][3]) if (_ssegs and _zsegs) else -999
+ck("[24] 本日运势行紧跟分数之后（左留白 ≤20px，v1.9.20 用户反馈「左侧留白太多」）",
+   bool(_ssegs) and bool(_zsegs) and 4 <= _gap <= 20,
+   "分数墨迹止于 %s / 文案首段起于 %s → 间隙 %dpx"
+   % (_ssegs[0][3] if _ssegs else "无", _zsegs[0][2] if _zsegs else "无", _gap))
+ck("[24] 值神行渲染后有且仅有一段墨迹（真的一行，不折行）",
+   len(_tsegs) == 1, "段数 %d（若为 2 即又折成两行）" % len(_tsegs))
+ck("[24] 值神行墨迹右缘不越出可用宽（≤ 卦象框左缘 − 8）",
+   bool(_tsegs) and _tsegs[0][3] <= CalendarPage.GUA_RECT.left() - 8,
+   "右缘 %s / 上限 %d" % (_tsegs[0][3] if _tsegs else "无",
+                          CalendarPage.GUA_RECT.left() - 8))
+ck("[24] 缩排探针 probe_fit.py 存在（穷举最小代价 / 缓存 / 溢出复算）",
+   os.path.exists(os.path.join(_ROOT, "tools", "dev_checks", "probe_fit.py")))
+
+# ---- [25] v1.9.20 起：卦象框内卦画整体等比缩小（v1.9.21 再缩 90%） ----
+# 用户反馈：「框里面的卦象 缩小到 90%」→「卦象图再缩小 90%」（0.9 → 0.81）。
+_SC25 = CalendarPage.GUA_SCALE
+ck("[25] GUA_SCALE 为等比缩放系数（只缩卦画本体，方框尺寸不动）",
+   abs(_SC25 - 0.81) < 1e-9 and CalendarPage.GUA_RECT.width() == 52,
+   "GUA_SCALE=%.2f（0.9×0.9）/ 方框 %s" % (_SC25, CalendarPage.GUA_RECT.size()))
+_src_pg20 = inspect.getsource(CalendarPage._paint_gua)
+ck("[25] 条高 / 条间距 / 左右内缩 / 阴爻中缝均乘以 GUA_SCALE（等比）",
+   "4 * sc" in _src_pg20 and "6 * sc" in _src_pg20
+   and "(r.width() - 14) * sc" in _src_pg20 and "sc = self.GUA_SCALE" in _src_pg20)
+ck("[25] 等比缩放后改用 QRectF 绘制（条宽高为小数，靠 AA 平滑）",
+   "QRectF(bx, yy, inner_w, bar_h)" in _src_pg20
+   and "QRectF(bx, yy, seg, bar_h)" in _src_pg20
+   and "drawRect(bx, yy, inner_w, bar_h)" not in _src_pg20)
+
+
+def _gua_ink(d):
+    """渲染一页，返回卦画墨迹 (左, 右, 顶, 底)（排除 2px 方框本身）。
+
+    阈值取 170：实测 140 会把 AA 过渡行漏掉（高 38 → 比 0.864），
+    170 / 200 结果一致稳定（34×40 → 0.895 / 0.909）。
+    """
+    setup(d)
+    page.zodiac_report = None
+    page._sheen_t = 0.0
+    page.repaint()
+    img = page.grab().toImage()
+    r = CalendarPage.GUA_RECT
+    xs, ys = [], []
+    for yy in range(r.top() + 3, r.bottom() - 2):
+        for xx in range(r.left() + 3, r.right() - 2):
+            if img.pixelColor(xx, yy).lightness() < 170:
+                xs.append(xx)
+                ys.append(yy)
+    return (min(xs), max(xs), min(ys), max(ys)) if xs else None
+
+
+_gb = _gua_ink(date(2026, 10, 25))          # 泰卦：六爻俱全，量得到完整包围盒
+_gr = CalendarPage.GUA_RECT
+_gw, _gh = (_gb[1] - _gb[0] + 1), (_gb[3] - _gb[2] + 1)
+ck("[25] 卦画实测尺寸 = 100% 基线（38×44）× GUA_SCALE（±2px）",
+   _gb and abs(_gw - 38 * _SC25) <= 2 and abs(_gh - 44 * _SC25) <= 2,
+   "实测 %d×%d（目标 %.1f×%.1f）→ 比 %.3f / %.3f"
+   % (_gw, _gh, 38 * _SC25, 44 * _SC25, _gw / 38.0, _gh / 44.0) if _gb else "无墨迹")
+ck("[25] 缩小后仍在框内双向居中（左右 / 上下留白各差 ≤2px）",
+   _gb and abs((_gb[0] - _gr.left()) - (_gr.right() - _gb[1])) <= 2
+   and abs((_gb[2] - _gr.top()) - (_gr.bottom() - _gb[3])) <= 2,
+   "左右留白 %d/%d、上下留白 %d/%d"
+   % (_gb[0] - _gr.left(), _gr.right() - _gb[1],
+      _gb[2] - _gr.top(), _gr.bottom() - _gb[3]) if _gb else "无墨迹")
+ck("[25] 实测墨迹/基线比与 GUA_SCALE 一致（±0.04），确实缩了且没缩过头",
+   _gb and abs(_gw / 38.0 - _SC25) <= 0.04 and abs(_gh / 44.0 - _SC25) <= 0.04)
+
+# ---- [26] v1.9.21：悬停卦象提示「行距紧凑化」 ----
+# 用户反馈：「悬停窗中 行与行间隔太大，改到紧凑些」。
+from calendar_app.gua import gua_tip as _gt26                    # noqa: E402
+# 注意：gua_tip() 收的是「卦象 dict」（engine 已把 daily_gua() 的结果挂在 info["gua"]），
+# 不是 day_info 本身 —— 传错会 KeyError: 'name'。
+_tip_gua26 = _eng.get_day_info(date(2026, 10, 1)).get("gua")
+_tip26 = _gt26(_tip_gua26)
+ck("[26] 基准日已生成卦象（后续紧凑化断言才有意义）",
+   bool(_tip_gua26) and bool(_tip26), "卦 = %s" % (_tip_gua26 or {}).get("name"))
+ck("[26] 悬停提示不再有空行分段（空行 = 整行行高，正是「间隔太大」的根因）",
+   "\n\n" not in _tip26, "段数 = %d" % (_tip26.count("\n") + 1))
+ck("[26] 悬停提示恒为 4 行（卦名 / 上下卦 / 简释 / 起卦依据）",
+   _tip26.count("\n") == 3, "行数 = %d" % (_tip26.count("\n") + 1))
+from PySide6.QtGui import QFont as _QF26, QFontMetricsF as _FMF26  # noqa: E402
+from calendar_app import fonts as _caf26                          # noqa: E402
+_f26 = _QF26()
+_f26.setFamilies([_caf26.SANS_FAMILY])      # tooltip QSS 用的是内置黑体 13px
+_f26.setPixelSize(13)
+_fm26 = _FMF26(_f26)
+_h_new = (_tip26.count("\n") + 1) * _fm26.lineSpacing()
+_h_old = 6 * _fm26.lineSpacing()             # 旧版 4 段 + 2 空行 = 6 行
+ck("[26] 提示窗文本高度按 tooltip 字体（13px 黑体）量得 ≤80px，比旧版省 ≥30%%",
+   _h_new <= 80 and (_h_old - _h_new) / _h_old >= 0.30,
+   "旧 %d 行 %.0fpx → 新 %d 行 %.0fpx（省 %.0f%%）"
+   % (6, _h_old, _tip26.count("\n") + 1, _h_new, 100 * (_h_old - _h_new) / _h_old))
+ck("[26] 紧凑化未丢信息（卦名 / 上下卦 / 简释 / 起卦依据四要素仍在）",
+   all(k in _tip26 for k in ("卦（", "上", "下", "起卦", "梅花易数年月日式")))
+
+# ---- [27] v1.9.22 新增 / v1.9.23 去框·放大 150% / v1.9.24 改用素材 PNG ----
+# 用户反馈：「在红框处加入当日对应 28 星宿图」。红框实测为页面 (410,584)-(487,639)。
+# v1.9.23 用户再要求：「删除星宿外部的框，图片放大到 150%」。
+# v1.9.24 用户三改：「星宿图用（项目根/二十八星宿）这个路径下的 png 图片」。
+from calendar_app.xiu28 import (XIU28 as _X28, XIU_CHIN as _XC28,
+                                XIU_VARIANTS as _XV28,
+                                xiu_full_name as _xfn28)      # noqa: E402
+import ui.theme as _TH                                        # noqa: E402
+
+ck("[27] 二十八宿齐全（28 个、无重复）",
+   len(_X28) == 28 and len(set(_X28)) == 28)
+ck("[27] 宿名正序（东方苍龙 → 北方玄武 → 西方白虎 → 南方朱雀）",
+   _X28[:7] == ["角", "亢", "氐", "房", "心", "尾", "箕"]
+   and _X28[21:] == ["井", "鬼", "柳", "星", "张", "翼", "轸"], "".join(_X28))
+
+# v1.9.24：星图改为「用户提供的 300×300 古刻本 PNG」贴图 —— 校验素材侧
+_idx27 = _TH._xiu_index()
+_miss27 = [n for n in _X28 if n not in _idx27]
+ck("[27] v1.9.24 星图素材齐备（`二十八星宿/` 下 28 个宿都有对应 PNG）",
+   not _miss27, "缺素材: %s（索引共 %d 个）" % (_miss27 or "无", len(_idx27)))
+ck("[27] 素材索引键与二十八宿一一对应（无多余 / 无错位）",
+   set(_idx27) == set(_X28), "索引键: %s" % "".join(sorted(_idx27)))
+
+_bad27 = []
+for _n in _X28:
+    _src = _TH._xiu_source(_idx27.get(_n))
+    if _src is None:
+        _bad27.append((_n, "读不出图"))
+    elif _src.width() < 40 or _src.height() < 40:
+        _bad27.append((_n, "裁后过小", _src.width(), _src.height()))
+ck("[27] 每张素材都能读出并裁出有效墨迹包围盒（透明边已裁掉，≥40×40）",
+   not _bad27, "异常: %s" % (_bad27 or "无"))
+ck("[27] 素材裁切用 createAlphaMask 阈值（alpha≥128）：避免纸面淡纹理噪点撑大包围盒",
+   "createAlphaMask" in inspect.getsource(_TH._xiu_source))
+
+# ---- engine 侧字段：必须与 lunar_python 逐项一致（不是自己另算一套） ----
+_i27 = _eng.get_day_info(date(2026, 10, 10))
+ck("[27] engine 输出当日宿字段（宿 / 七曜 / 宿禽 / 吉凶 / 四象 / 方位）",
+   all(_i27.get(k) for k in ("xiu", "xiu_zheng", "xiu_animal",
+                             "xiu_luck", "xiu_shou", "xiu_gong")),
+   "%s%s%s %s %s %s" % (_i27.get("xiu"), _i27.get("xiu_zheng"),
+                        _i27.get("xiu_animal"), _i27.get("xiu_luck"),
+                        _i27.get("xiu_shou"), _i27.get("xiu_gong")))
+from lunar_python import Solar as _Sol27                        # noqa: E402
+_lun27 = _Sol27.fromYmd(2026, 10, 10).getLunar()
+ck("[27] 宿字段与 lunar_python 逐项一致",
+   (_i27["xiu"], _i27["xiu_zheng"], _i27["xiu_animal"], _i27["xiu_luck"],
+    _i27["xiu_shou"], _i27["xiu_gong"])
+   == (_lun27.getXiu(), _lun27.getZheng(), _lun27.getAnimal(),
+       _lun27.getXiuLuck(), _lun27.getShou(), _lun27.getGong()),
+   "engine=%s | lunar=%s" % (_i27["xiu"], _lun27.getXiu()))
+
+# 28 天遍历：应覆盖全部 28 宿，且 (七曜, 宿禽) 与静态表 XIU_CHIN 完全一致
+_real27 = {}
+_start27 = date(2026, 10, 10)
+for _k in range(28):
+    _ii = _eng.get_day_info(_start27 + timedelta(days=_k))
+    _real27[_ii["xiu"]] = (_ii["xiu_zheng"], _ii["xiu_animal"])
+ck("[27] 28 天实际覆盖全部 28 宿（二十八宿 28 日一轮回）",
+   len(_real27) == 28, "覆盖 %d 个" % len(_real27))
+# 七曜必须逐字一致；宿禽允许「已知异文」（如 胃＝雉/彘，见 XIU_VARIANTS）
+_chin_bad27 = [n for n in _X28
+               if _real27.get(n, ("", ""))[0] != _XC28[n][0]
+               or _real27.get(n, ("", ""))[1]
+               not in ({_XC28[n][1]} | set(_XV28.get(n, ())))]
+ck("[27] 遍历出的 (七曜, 宿禽) 与静态表一致（宿禽按已知异文放行：%s）"
+   % "、".join("%s=%s" % (k, "/".join(sorted(v))) for k, v in _XV28.items()),
+   not _chin_bad27, "不一致: %s" % (_chin_bad27 or "无"))
+ck("[27] 异文登记只覆盖真实存在的分歧（集合 ≥2 且都非空，避免把表写宽成万能）",
+   all(len(v) >= 2 and all(x for x in v) for v in _XV28.values())
+   and set(_XV28) <= set(_X28), "%s" % (_XV28,))
+
+# ---- 绘制端（v1.9.24：贴用户 PNG 素材，不再矢量绘制） ----
+_src_px27 = inspect.getsource(CalendarPage._paint_xiu)
+_src_th27 = inspect.getsource(_TH.xiu_pixmap)
+ck("[27] _paint_hours_colors 调用了 _paint_xiu（星图画在「颜色」卡内）",
+   "_paint_xiu" in inspect.getsource(CalendarPage._paint_hours_colors)
+   and "xiu_pixmap(" in _src_px27 and "xiu_full_name(" in _src_px27)
+ck("[27] v1.9.24 星图改为素材贴图：drawPixmap 居中绘制，不再走矢量线稿",
+   "drawPixmap(" in _src_px27 and "xiu_figure(" not in _src_px27
+   and "drawLine(" not in _src_px27 and "drawEllipse(" not in _src_px27)
+ck("[27] 贴图走 ui.theme.xiu_pixmap（等比 + CompositionMode_SourceIn 主题着色 + 三级缓存）",
+   "xiu_pixmap(" in _src_px27 and "CompositionMode_SourceIn" in _src_th27
+   and "_XIU_PIX_CACHE" in _src_th27
+   and "_XIU_SRC_CACHE" in inspect.getsource(_TH._xiu_source))
+ck("[27] v1.9.23 删除星图外部边框（_paint_xiu 内已无任何 drawRect / drawRoundedRect）",
+   "drawRoundedRect" not in _src_px27 and "drawRect" not in _src_px27
+   and "edge_col" not in _src_px27)
+ck("[27] 图形区 box = QRect(r.left(), r.top()-7, r.width(), 49)（贴图后重排，上下各留 2 行）",
+   "box = QRect(r.left(), r.top() - 7, r.width(), 49)" in _src_px27)
+ck("[27] 宿名行高 13px、矩形顶 = 格底 -12（贴图后仍给星图让出空间）",
+   "r.bottom() - 12, r.width(), 13" in _src_px27)
+ck("[27] XIU_RECT 与用户红框量测位置一致（410..487 / 584..639，±4px）",
+   abs(CalendarPage.XIU_RECT.left() - 410) <= 4
+   and abs(CalendarPage.XIU_RECT.right() - 487) <= 4
+   and abs(CalendarPage.XIU_RECT.top() - 584) <= 4
+   and abs(CalendarPage.XIU_RECT.bottom() - 639) <= 4,
+   "%s" % (CalendarPage.XIU_RECT,))
+
+
+def _xiu_img(d):
+    """渲染一页（离屏，禁 processEvents），返回 QImage。"""
+    setup(d)
+    page.zodiac_report = None
+    page._sheen_t = 0.0
+    page.repaint()
+    return page.grab().toImage()
+
+
+def _xiu_bbox(img, y0, y1, x0, x1):
+    """在给定矩形内求墨迹包围盒 (x_min, x_max, y_min, y_max)；无墨迹返回 None。"""
+    xs, ys = [], []
+    for yy in range(y0, y1 + 1):
+        for xx in range(x0, x1 + 1):
+            if img.pixelColor(xx, yy).lightness() < 170:
+                xs.append(xx)
+                ys.append(yy)
+    return (min(xs), max(xs), min(ys), max(ys)) if xs else None
+
+
+def _xiu_ink_rgb(img, y0, y1, x0, x1):
+    """给定矩形内墨迹像素的平均 RGB（判主题着色是否生效）。"""
+    r = g = b = n = 0
+    for yy in range(y0, y1 + 1):
+        for xx in range(x0, x1 + 1):
+            c = img.pixelColor(xx, yy)
+            if c.lightness() < 170:
+                r += c.red()
+                g += c.green()
+                b += c.blue()
+                n += 1
+    return (r / n, g / n, b / n) if n else (0.0, 0.0, 0.0)
+
+
+_xr27 = CalendarPage.XIU_RECT
+_LAB_TOP27 = _xr27.bottom() - 12          # 宿名行矩形顶 = 626
+# 「颜色」卡外框：drawRect(262, 574, 228, 68) + 2px 笔 → 上框线墨迹 573..574、下框线 641..642
+_CARD_CB27 = 641                          # 卡片下框线首行
+_FIG_Y27 = (_xr27.top() - 9, _LAB_TOP27 - 1)   # 图形区行带 575..625（避开卡上框线 574）
+_FIG_X27 = (410, 488)                     # 星图列带（避开色点 281..289 与卡右框线 489）
+
+_img27a = _xiu_img(date(2026, 10, 10))
+_fi27 = _xiu_bbox(_img27a, _FIG_Y27[0], _FIG_Y27[1], *_FIG_X27)
+_lb27 = _xiu_bbox(_img27a, _LAB_TOP27, _xr27.bottom(), *_FIG_X27)
+ck("[27] 星图墨迹存在，且不压卡片上框线（墨迹顶 ≥ 577 = 框线 574 下留 3 行）、不越 XIU_RECT",
+   bool(_fi27) and _fi27[2] >= 577
+   and _fi27[0] >= _xr27.left() and _fi27[1] <= _xr27.right(),
+   "图形墨迹 %s（卡上框线 573..574 / 卡右框线 489..490）" % (_fi27,))
+ck("[27] 宿名墨迹存在，且距卡片下框线 ≥3 行（贴图后不再贴框）",
+   bool(_lb27) and _CARD_CB27 - _lb27[3] >= 4,
+   "宿名墨迹 %s（卡下框线 y=%d）" % (_lb27, _CARD_CB27))
+ck("[27] 星图与宿名两行之间有空白（图形墨迹下缘 ↔ 宿名墨迹上缘 ≥2 行）",
+   bool(_fi27) and bool(_lb27) and _lb27[2] - _fi27[3] >= 3,
+   "图形下缘 y=%d / 宿名上缘 y=%d（间距 %d 行）"
+   % (_fi27[3], _lb27[2], _lb27[2] - _fi27[3]))
+
+# 逐日：图形都有墨迹、都落在带内；记录墨迹高/宽 与「图形 ↔ 宿名」间距
+_h27, _w27, _gap27, _bad_band27, _worst27 = [], [], [], [], None
+for _k in range(28):
+    _d = _start27 + timedelta(days=_k)
+    _im = _xiu_img(_d)
+    _bb = _xiu_bbox(_im, _FIG_Y27[0], _FIG_Y27[1], *_FIG_X27)
+    _lb = _xiu_bbox(_im, _LAB_TOP27, _xr27.bottom(), *_FIG_X27)
+    if not _bb:
+        _bad_band27.append((_d.isoformat(), None))
+        continue
+    _hh = _bb[3] - _bb[2] + 1
+    _h27.append(_hh)
+    _w27.append(_bb[1] - _bb[0] + 1)
+    if _worst27 is None or _hh > _h27[_worst27]:
+        _worst27 = len(_h27) - 1
+    if _lb:
+        _gap27.append(_lb[2] - _bb[3])
+    else:
+        _bad_band27.append((_d.isoformat(), "无宿名"))
+    if _bb[2] < 577 or _bb[3] > _FIG_Y27[1] \
+            or _bb[0] < _xr27.left() or _bb[1] > _xr27.right():
+        _bad_band27.append((_d.isoformat(), _bb))
+ck("[27] 28 天逐日：星图都有墨迹，且都落在「卡片上框线下方 3 行 ↔ 宿名行上方」带内",
+   not _bad_band27 and len(_h27) == 28, "异常 %s" % (_bad_band27 or "无"))
+ck("[27] 28 天逐日：星图与宿名两行之间始终留白（下缘 ↔ 上缘 ≥2 行）",
+   _gap27 and min(_gap27) >= 3, "最小间距 %s 行" % (min(_gap27) if _gap27 else "-"))
+ck("[27] v1.9.24 素材均被裁到墨迹并等比缩放（28 天图形墨迹高 28..49 行、宽 41..77）",
+   _h27 and 28 <= min(_h27) and max(_h27) <= 49
+   and 41 <= min(_w27) and max(_w27) <= 77,
+   "高 %d..%d 行 / 宽 %d..%d（最满 %s）"
+   % (min(_h27 or [0]), max(_h27 or [0]), min(_w27 or [0]), max(_w27 or [0]),
+      (_start27 + timedelta(days=_worst27)).isoformat()
+      if _worst27 is not None else "-"))
+
+# 主题着色：红日墨迹偏红、绿日墨迹偏绿（CompositionMode_SourceIn 换色生效）
+# ⚠ 红日基准必须取**真红日**（RED=2026-09-27 周日）；2026-10-10 是调休上班日 → 绿主题，
+#   用它当「红日」会与绿日采样都偏绿，断言必假失败。
+_rgb_red27 = _xiu_ink_rgb(_xiu_img(RED), _FIG_Y27[0], _FIG_Y27[1], *_FIG_X27)
+_rgb_grn27 = _xiu_ink_rgb(_xiu_img(GREEN), _FIG_Y27[0], _FIG_Y27[1], *_FIG_X27)
+ck("[27] v1.9.24 星图按主题着色：红日墨迹红占优、绿日墨迹绿占优",
+   _rgb_red27[0] > _rgb_red27[1] + 20 and _rgb_red27[0] > _rgb_red27[2] + 20
+   and _rgb_grn27[1] > _rgb_grn27[0] + 20 and _rgb_grn27[1] > _rgb_grn27[2] + 20,
+   "红日(%s) RGB(%.0f,%.0f,%.0f) / 绿日(%s) RGB(%.0f,%.0f,%.0f)"
+   % ((RED,) + _rgb_red27 + (GREEN,) + _rgb_grn27))
+
+# 「颜色」三行色名的墨迹右缘必须留出星图区（否则星图会压在文字上）。
+# ⚠ 量的是**三行色名自身**的行带（y 589..637，与 _paint_hours_colors 的行位一致），
+#   且 x 从 290 起（跳过 x 281..289 的色点）—— 若把卡片上框线算进来，会误得 x=409。
+_img27 = _xiu_img(date(2026, 10, 15))
+_right27 = 0
+for _yy in range(589, 638):
+    for _xx in range(290, _xr27.left()):
+        if _img27.pixelColor(_xx, _yy).lightness() < 170:
+            _right27 = max(_right27, _xx)
+ck("[27] 「颜色」三行色名墨迹不侵入星图区（右缘 < 星图墨迹左缘）",
+   0 < _right27 < _fi27[0],
+   "色名右缘 x=%d / 星图墨迹左缘 x=%d（余量 %dpx）"
+   % (_right27, _fi27[0], _fi27[0] - _right27))
+ck("[27] 宿名按「宿＋七曜＋禽」三字呈现（如 柳土獐 / 角木蛟）",
+   _xfn28("柳", "土", "獐") == "柳土獐" and _xfn28("角", "木", "蛟") == "角木蛟"
+   and _xfn28("壁") == "壁水獝",
+   "%s / %s / %s" % (_xfn28("柳", "土", "獐"), _xfn28("角", "木", "蛟"),
+                     _xfn28("壁")))
+ck("[27] 三字宿名取静态表口径（胃＝胃土雉，不随 lunar_python 的「彘」漂移）",
+   _xfn28("胃", "土", "彘") == "胃土雉" and _xfn28("胃") == "胃土雉",
+   "胃 → %s" % _xfn28("胃", "土", "彘"))
+ck("[27] 未知 / 空宿名不崩（xiu_pixmap 返回空 QPixmap，绘制端直接跳过）",
+   _TH.xiu_pixmap("", "#000000", 77, 49).isNull()
+   and _TH.xiu_pixmap("喵", "#000000", 77, 49).isNull())
+
+# ---- [28] v1.9.25：分数 / 本日运势 行下移 5px（用户反馈「分数 和 本日运势 偏高」） ----
+_src_pf28 = inspect.getsource(CalendarPage._paint_fortune)
+ck("[28] 分数与「本日运势」行同用 dy=5 偏移下移（字面量写死，防被顺手改回）",
+   "dy = 5" in _src_pf28
+   and "QRect(94, y - 4 + dy, 84, 26)" in _src_pf28
+   and "QRect(z_x, y + dy, z_w, 22)" in _src_pf28)
+ck("[28] 左「吉/平/凶」框与右「今日卦象」框不下移（仍在 y=484 一线）",
+   "p.drawRect(30, y, 52, h)" in _src_pf28
+   and CalendarPage.GUA_RECT.top() == 484)
+ck("[28] 值神行不下移（仍走 y+24 的带内居中公式，未跟随 dy）",
+   "block_top = y + 24 + (band_h - row_h) // 2" in _src_pf28)
+
+
+def _row_top28(x0, x1, y0, y1):
+    """渲染基准日（给 dump 令标签为「本日运势」），返回行带内首个墨迹的 y。"""
+    setup(date(2026, 10, 15))
+    page.zodiac_report = {"name": "狗", "tags": ["三合", "天德"], "score": 92,
+                          "tips": ["三合贵人"], "text": "三合贵人", "bazi_text": "x"}
+    page._sheen_t = 0.0
+    page.repaint()
+    _im28 = page.grab().toImage()
+    for _yy in range(y0, y1):
+        for _xx in range(x0, x1):
+            if _im28.pixelColor(_xx, _yy).lightness() < 140:
+                return _yy
+    return None
+
+
+_G28L = CalendarPage.GUA_RECT.left() - 8
+_t_s28 = _row_top28(88, 160, 480, 512)                 # 分数「NN 分」
+_t_z28 = _row_top28(161, _G28L, 480, 512)              # 本日运势行
+_t_t28 = _row_top28(94, _G28L, 512, 538)               # 值神行
+page.zodiac_report = None
+ck("[28] 实测：分数墨迹顶 490、本日运势墨迹顶 494（较 v1.9.24 各下移 5px）",
+   _t_s28 == 490 and _t_z28 == 494,
+   "分数顶 %s / 本日运势顶 %s（期望 490 / 494）" % (_t_s28, _t_z28))
+ck("[28] 实测：值神行未跟随下移（墨迹顶仍为 517）",
+   _t_t28 == 517, "值神顶 %s（期望 517）" % (_t_t28,))
 
 failed = [n for n, c, _ in R if not c]
 print("\n==== UI 复核 (v%s) ==== total=%d passed=%d failed=%d"

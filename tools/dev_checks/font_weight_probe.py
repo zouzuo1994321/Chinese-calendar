@@ -126,6 +126,53 @@ ck("页头切变后 Black 仍显著厚于 Normal", sh["Black"] > sh["Normal"] * 
    "Normal=%d Black=%d (+%.0f%%)"
    % (sh["Normal"], sh["Black"], (sh["Black"] - sh["Normal"]) * 100.0 / sh["Normal"]))
 
+# ---- 5. 宿名用字：内置字体覆盖 61/62，唯一缺口 U+735D「獝」（v1.9.22）----
+# ⚠ 本节**必须**在真实平台跑：离屏插件不做字体回退，任何缺失字都渲染成豆腐块，
+#    于是「缺字」与「有系统回退」在离屏下**无法区分**。真机上才能验证回退是否生效。
+print("\n[5] 二十八宿宿名用字（用字 62 个）")
+import glob as _glob                                              # noqa: E402
+
+from fontTools.ttLib import TTFont as _TTF                        # noqa: E402
+
+from calendar_app.xiu28 import XIU28 as _X28, XIU_CHIN as _XC28    # noqa: E402
+
+_NEED28 = set(_X28) | set("日月火水木金土") | {_XC28[n][1] for n in _X28}
+_cm28 = set()
+for _p in _glob.glob(os.path.join(FONTS.font_dir(), "*.ttf")):
+    _cm28 |= set(_TTF(_p, fontNumber=0, lazy=True).getBestCmap())
+_miss28 = [c for c in sorted(_NEED28) if ord(c) not in _cm28]
+ck("内置字体覆盖宿名用字（%d 个），缺口仅 U+735D「獝」" % len(_NEED28),
+   _miss28 == ["獝"], "用字 %d / 缺口 %s" % (len(_NEED28), _miss28 or "无"))
+
+
+def _sig(ch, px=22):
+    """渲染单字，返回 (墨迹量, 包围盒)；**缺字**（无任何字形可回退）渲染为空白。"""
+    img = QImage(64, 44, QImage.Format_ARGB32)
+    img.fill(0xFFFFFFFF)
+    p = QPainter(img)
+    p.setRenderHint(QPainter.Antialiasing, False)
+    p.setFont(_font(px, ZH_FONT, QFont.Black))
+    p.setPen(QColor("#000000"))
+    p.drawText(0, 34, ch)
+    p.end()
+    pts = [(x, y) for y in range(44) for x in range(64)
+           if img.pixelColor(x, y).red() < 160]
+    if not pts:
+        return (0, None)
+    return (len(pts), (min(a for a, _ in pts), max(a for a, _ in pts),
+                       min(b for _, b in pts), max(b for _, b in pts)))
+
+
+_tofu = _sig("\ue123")          # 私用区：无字形可回退 → 空白
+ck("方法自证：无字形的私用区字符渲染为空白（缺字可被本探针检出）",
+   _tofu[0] == 0, "私用区 signature = %s" % (_tofu,))
+
+_bad_font = [c for c in sorted(_NEED28) if _sig(c)[0] == 0]
+ck("真机下 62 个宿名用字**全部**有字形（含系统回退，无缺字）",
+   not _bad_font, "缺字: %s" % (_bad_font or "无"))
+ck("「獝」虽不在内置字体里，但在真机上确有字形（系统回退生效）",
+   _sig("獝")[0] > 0, "獝 signature = %s" % (_sig("獝"),))
+
 ok = sum(1 for _n, c, _d in R if c)
 print("\n==== 内置字体字重实测 ==== total=%d passed=%d failed=%d"
       % (len(R), ok, len(R) - ok))

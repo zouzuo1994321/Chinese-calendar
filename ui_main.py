@@ -19,6 +19,7 @@ from PySide6.QtCore import (QDate, QEasingCurve, QPoint, QRect, QRectF, Qt,
 from PySide6.QtGui import (QColor, QFont, QIcon, QPainter, QPen,
                            QPixmap)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog,
+                               QFileDialog,
                                QGraphicsOpacityEffect, QHBoxLayout, QLabel,
                                QMainWindow, QMenu, QMessageBox, QPushButton,
                                QSystemTrayIcon, QVBoxLayout, QWidget)
@@ -29,6 +30,7 @@ except Exception:   # 非 Windows 平台（开发用）降级
     winreg = None
 
 from calendar_app import fonts as calendar_app_fonts
+from calendar_app import holidays as HOL
 from calendar_app import version as VER
 from calendar_app.agenda_pdf import load_cache, import_agenda
 from calendar_app.bridge import BRIDGE
@@ -584,6 +586,76 @@ class MainWindow(QMainWindow):
             row.addStretch(1)
             root.addLayout(row)
 
+        # ---- 国定假日导入（v1.9.18）----
+        # 内置表只到当前年份，后续年份（含「调休上班日」）由用户下载模板填写后导入。
+        root.addWidget(QLabel("<hr>"))
+        root.addWidget(QLabel("<b>国定假日导入</b>"))
+        _yrs = sorted(HOL.merged_years())
+        tip_hol = QLabel(
+            "法定假日与<b>调休上班日</b>（周末上班 → 保持绿色）随程序内置至 "
+            "<b>%d 年</b>，后续年份可自行更新：<br>"
+            "① 点「下载假期模板」得到 Excel 模板（已预填当前生效表）；<br>"
+            "② 按模板填好「放假 / 调休上班」行，点「导入假期安排」选择该文件。<br>"
+            "<span style='color:#8a8a80;'>导入后<b>同一年</b>整体覆盖内置表；"
+            "全部离线，不联网、不上报。</span>" % (max(_yrs) if _yrs else 0))
+        tip_hol.setWordWrap(True)
+        root.addWidget(tip_hol)
+
+        lb_hol = QLabel("当前生效：%s 年。"
+                        % ("、".join(str(y) for y in _yrs) if _yrs else "—"))
+        lb_hol.setWordWrap(True)
+        lb_hol.setStyleSheet("color:#555;")
+
+        def _hol_template():
+            p, _ = QFileDialog.getSaveFileName(
+                dlg, "保存国定假日模板",
+                os.path.join(os.path.expanduser("~"), "Desktop", "国定假日模板.xlsx"),
+                "Excel 表格 (*.xlsx)")
+            if not p:
+                return
+            if not p.lower().endswith(".xlsx"):
+                p += ".xlsx"
+            try:
+                HOL.make_template(p)
+                lb_hol.setText("✔ 模板已保存：%s" % p)
+            except Exception as e:                     # noqa: BLE001
+                lb_hol.setText("✘ 模板生成失败：%s" % e)
+
+        def _hol_import():
+            p, _ = QFileDialog.getOpenFileName(
+                dlg, "选择国定假日文件（Excel / CSV）", os.path.expanduser("~"),
+                "假日文件 (*.xlsx *.csv);;Excel 表格 (*.xlsx);;CSV (*.csv)")
+            if not p:
+                return
+            try:
+                res = HOL.import_holidays(p)
+                lb_hol.setText(
+                    "✔ 已导入 %s 年：放假 %d 段 / 调休上班 %d 天。关闭本窗口后生效。"
+                    % ("、".join(str(y) for y in res["years"]),
+                       res["holiday_rows"], res["workday_rows"]))
+                self._holiday_imported = True
+            except Exception as e:                     # noqa: BLE001
+                lb_hol.setText("✘ 导入失败：%s" % e)
+
+        def _hol_clear():
+            try:
+                HOL.clear_user_years()
+                self._holiday_imported = True
+                lb_hol.setText("✔ 已清除导入，恢复内置表。关闭本窗口后生效。")
+            except Exception as e:                     # noqa: BLE001
+                lb_hol.setText("✘ 操作失败：%s" % e)
+
+        hb_hol = QHBoxLayout()
+        for text, slot in (("下载假期模板", _hol_template),
+                           ("导入假期安排", _hol_import),
+                           ("恢复内置", _hol_clear)):
+            b = QPushButton(text)
+            b.setFixedHeight(30)
+            b.clicked.connect(slot)
+            hb_hol.addWidget(b)
+        root.addLayout(hb_hol)
+        root.addWidget(lb_hol)
+
         # 开机自动启动开关
         cb = QCheckBox("开机自动启动")
         cb.setChecked(bool(self.settings.get("autostart", False)))
@@ -597,7 +669,12 @@ class MainWindow(QMainWindow):
         hb.addStretch(1)
         hb.addWidget(ok)
         root.addLayout(hb)
+        self._holiday_imported = False
         dlg.exec()
+        if self._holiday_imported:
+            # 假日表已变 → 立即按新表重算当日（红/绿主题 + 「调休上班 / 法定假日」文案）
+            HOL.reload()
+            self._set_date(self.page.info["date"])
 
     def _on_autostart_toggle(self, state):
         enabled = bool(state)

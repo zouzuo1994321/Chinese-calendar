@@ -13,6 +13,10 @@ from datetime import date
 
 from lunar_python import Solar
 
+from calendar_app.gua import daily_gua
+from calendar_app.holidays import (BUILTIN_YEARS, get_holiday,  # noqa: F401
+                                   is_makeup_workday)
+
 # --------------------------------------------------------------------------
 # 一、建除十二神 → 宜 / 忌（通胜正文主干，引自钦天监通书数据）
 # --------------------------------------------------------------------------
@@ -127,26 +131,12 @@ SHENG_SRC = {"木": "水", "火": "木", "土": "火", "金": "土", "水": "金
 BE_KE = {"木": "金", "金": "火", "火": "水", "水": "土", "土": "木"}       # 克我者
 
 # --------------------------------------------------------------------------
-# 七、法定假日表（2026–2027 常规放假日程，供红色主题触发；其余年份按节日当日识别）
+# 七、法定假日 / 调休上班（数据与导入逻辑见 calendar_app/holidays.py）
 # --------------------------------------------------------------------------
-
-STATUTORY_RANGES = {
-    2026: [("元旦", "2026-01-01", "2026-01-03"),
-           ("春节", "2026-02-16", "2026-02-22"),
-           ("清明节", "2026-04-04", "2026-04-06"),
-           ("劳动节", "2026-05-01", "2026-05-05"),
-           ("端午节", "2026-06-19", "2026-06-21"),
-           ("中秋节", "2026-09-25", "2026-09-27"),
-           ("国庆节", "2026-10-01", "2026-10-07")],
-    2027: [("元旦", "2027-01-01", "2027-01-03"),
-           ("春节", "2027-02-05", "2027-02-11"),
-           ("清明节", "2027-04-03", "2027-04-05"),
-           ("劳动节", "2027-05-01", "2027-05-05"),
-           ("端午节", "2027-06-09", "2027-06-11"),
-           ("中秋节", "2027-09-14", "2027-09-16"),
-           ("国庆节", "2027-10-01", "2027-10-07")],
-}
-_STATUTORY_FESTIVAL_NAMES = {"元旦", "国庆节", "劳动节", "春节", "端午节", "中秋节", "清明节"}
+# v1.9.18：内置表 + 用户导入覆盖都搬到 `calendar_app/holidays.py`，此处只做兼容再导出。
+# `get_holiday` / `is_makeup_workday` / `merged_years` 自该模块导入（见文件头 import）。
+STATUTORY_RANGES = {y: [(n, s, e) for n, s, e in v["holidays"]]
+                    for y, v in BUILTIN_YEARS.items()}
 
 
 def _safe(fn, default="—"):
@@ -157,31 +147,6 @@ def _safe(fn, default="—"):
         return v
     except Exception:
         return default
-
-
-def get_holiday(d: date):
-    """若为法定假日返回假名（如「国庆节」），否则 None。"""
-    for name, s, e in STATUTORY_RANGES.get(d.year, []):
-        try:
-            ys, ms, ds = map(int, s.split("-"))
-            ye, me, de = map(int, e.split("-"))
-            if date(ys, ms, ds) <= d <= date(ye, me, de):
-                return name
-        except Exception:
-            continue
-    # 兜底：节日当日识别
-    try:
-        solar = Solar.fromYmd(d.year, d.month, d.day)
-        lunar = solar.getLunar()
-        fests = set(solar.getFestivals()) | set(lunar.getFestivals())
-        hit = fests & _STATUTORY_FESTIVAL_NAMES
-        if hit:
-            return sorted(hit)[0]
-        if lunar.getJieQi() == "清明":
-            return "清明节"
-    except Exception:
-        pass
-    return None
 
 
 def get_lucky_hours(lunar) -> list:
@@ -370,7 +335,9 @@ def get_day_info(d: date) -> dict:
         "lunar_year_shengxiao": lunar.getYearShengXiao(),
         "lunar_month_cn": ("闰" if leap else "") + month_cn + "月",
         "lunar_month_plain": month_cn,          # 农历月名（无闰字，用于匹配行事历）
+        "lunar_month_num": abs(lunar.getMonth()),   # 农历月数 1..12（闰月取月号，供起卦）
         "lunar_day_cn": lunar.getDayInChinese(),
+        "lunar_day_num": lunar.getDay(),             # 农历日数 1..30（供起卦）
         "lunar_month_size": ("大" if _lunar_month_size(lunar) else "小"),
         "year_ganzhi": lunar.getYearInGanZhi(),
         "month_ganzhi": lunar.getMonthInGanZhi(),
@@ -396,8 +363,25 @@ def get_day_info(d: date) -> dict:
         "fortune_grade": grade,
         "fortune_tip": grade_tip,
     }
-    # 扩展：法定假日 / 吉时 / 吉凶颜色 / 分项建议 / 箴言谶言
+    # 扩展：法定假日 / 双休日 / 今日卦象 / 吉时 / 吉凶颜色 / 分项建议 / 箴言谶言
     info["holiday"] = get_holiday(d)
+    # v1.9.17：双休日（周六 / 周日）同样走红色主题（用户反馈「让双休日也改为红色」）。
+    # 与 holiday 分开存：holiday 用于「法定假日 · xx」文案，weekend 仅参与配色判定，
+    # 避免周末被误标成法定假日。
+    info["weekend"] = d.weekday() >= 5
+    # v1.9.18：调休上班日（周末但被国务院调为工作日）→ 不触发红色主题（用户反馈
+    # 「今天按照国内是调休，虽然是周末但是是上班的」）。页头另行标注「调休上班」。
+    info["workday"] = is_makeup_workday(d)
+    info["gua"] = daily_gua(info)
+    # v1.9.22：今日二十八宿值日（用户要求「在红框处加入当日对应 28 星宿图」）。
+    # 宿名 / 七曜 / 宿禽 / 吉凶 / 四象 / 方位全部取自 lunar_python；
+    # 星图线稿见 calendar_app/xiu28.py（依古刻本人工定稿的归一化线稿）。
+    info["xiu"] = _safe(lunar.getXiu, "")
+    info["xiu_zheng"] = _safe(lunar.getZheng, "")
+    info["xiu_animal"] = _safe(lunar.getAnimal, "")
+    info["xiu_luck"] = _safe(lunar.getXiuLuck, "")
+    info["xiu_shou"] = _safe(lunar.getShou, "")
+    info["xiu_gong"] = _safe(lunar.getGong, "")
     info["lucky_hours"] = get_lucky_hours(lunar)
     info["lucky_colors"] = get_lucky_colors(lunar)
     info["advice"] = build_advice(info)

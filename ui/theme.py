@@ -4,8 +4,8 @@ import os
 import sys
 
 from PySide6.QtCore import Qt, QRect, QRectF
-from PySide6.QtGui import (QColor, QFont, QImage, QLinearGradient, QPainter,
-                           QPen, QPixmap)
+from PySide6.QtGui import (QBitmap, QColor, QFont, QImage, QLinearGradient,
+                           QPainter, QPen, QPixmap, QRegion)
 
 from calendar_app import fonts as calendar_app_fonts
 
@@ -64,6 +64,9 @@ IMG_BAGUA = os.path.join(_ROOT_DIR, "八卦.png")
 IMG_LOGO = os.path.join(_ROOT_DIR, "logo.png")
 # 龙 / 凤 / 云纹剪纸素材（随主题红绿切换）
 _LF_DIR = os.path.join(_ROOT_DIR, "龙凤")
+# 二十八宿星图素材（v1.9.24：用户提供的 300×300 古刻本 PNG —— 星点 + 连线 + 宿字 + 日文假名）
+# frozen：随包附带于 _MEIPASS/二十八星宿；源码：项目根/二十八星宿
+XIU_DIR = os.path.join(_ROOT_DIR, "二十八星宿")
 # 联系作者图标（白底透明，运行时着色为墨色）
 _ICON_DIR = os.path.join(_ROOT_DIR, "图标")
 IMG_ICON_GITHUB = os.path.join(_ICON_DIR, "github.png")
@@ -190,6 +193,88 @@ def _pix_scaled(path, w, h):
     return pm
 
 
+# ---------- 二十八宿星图素材（v1.9.24，用户提供的古刻本 PNG） ----------
+# 素材为 300×300 透明底黑墨线稿，每张自带「宿字 + 日文假名」，故**必须裁到墨迹包围盒**
+# 再等比缩放 —— 原图墨迹在画布里的占比与位置每宿都不同（角宿只占 128×135、奎宿占
+# 250×289），直接按画布缩放会让 28 天里星图大小参差不齐。
+# ⚠ 裁切阈值用 `createAlphaMask()`（alpha ≥ 128）：实测按 alpha > 8 会把纸面**淡纹理噪点**
+#   一并算进包围盒（角宿 128×135 → 误成 225×224、参宿顶部多出 21 行），出图必然大小不稳。
+# ⚠ 着色走 `QPainter.CompositionMode_SourceIn`（C++ 一次性替换 RGB、保留原 alpha），
+#   比 `_tinted_pixmap()` 的逐像素 Python 循环快两个数量级（后者 300×300 要 ~60ms/张）。
+_XIU_SRC_CACHE = {}      # 路径 -> 已裁到墨迹的 QImage（失败为 None）
+_XIU_PIX_CACHE = {}      # (路径, 颜色, 宽, 高) -> 着色 + 缩放后的 QPixmap
+_XIU_INDEX = None        # 宿名 -> 素材路径
+
+
+def _xiu_index():
+    """扫描素材目录，建立「宿名 → 文件路径」索引。
+
+    文件名形如 ``01 · 角宿-角木蛟.png`` —— 取「·」之后的首字（角 / 亢 / 氐 …）作键，
+    与 `calendar_app.xiu28.XIU28` 的宿名一一对应；目录缺失时返回空字典（绘制端自动跳过）。
+    """
+    global _XIU_INDEX
+    if _XIU_INDEX is None:
+        idx = {}
+        try:
+            for fn in os.listdir(XIU_DIR):
+                if not fn.lower().endswith(".png"):
+                    continue
+                head = fn.split("·", 1)[-1].strip()
+                if head:
+                    idx.setdefault(head[0], os.path.join(XIU_DIR, fn))
+        except OSError:
+            pass
+        _XIU_INDEX = idx
+    return _XIU_INDEX
+
+
+def _xiu_source(path):
+    """加载星图素材并裁到墨迹包围盒（透明边全部去掉），按路径缓存。"""
+    if path in _XIU_SRC_CACHE:
+        return _XIU_SRC_CACHE[path]
+    img = None
+    if path and os.path.exists(path):
+        raw = QImage(path)
+        if not raw.isNull():
+            img = raw.convertToFormat(QImage.Format_ARGB32)
+            bb = QRegion(QBitmap.fromImage(img.createAlphaMask())).boundingRect()
+            if bb.width() > 0 and bb.height() > 0:
+                img = img.copy(bb)
+    _XIU_SRC_CACHE[path] = img
+    return img
+
+
+def xiu_pixmap(name, color, box_w, box_h):
+    """宿名 → 按主题色着色的星图 QPixmap（等比缩放进 ``box_w`` × ``box_h``）。
+
+    三级缓存：素材（按路径）→ 成品（按 路径 / 颜色 / 尺寸）。`paintEvent` 每帧调用，
+    命中缓存后只是取一次字典，不得在绘制期读盘或缩放。
+    """
+    path = _xiu_index().get(name)
+    key = (path, QColor(color).name(), int(box_w), int(box_h))
+    pm = _XIU_PIX_CACHE.get(key)
+    if pm is not None:
+        return pm
+    src = _xiu_source(path) if path else None
+    if src is None:
+        pm = QPixmap()
+    else:
+        sc = min(box_w / float(src.width()), box_h / float(src.height()))
+        w = max(1, int(round(src.width() * sc)))
+        h = max(1, int(round(src.height() * sc)))
+        small = src.scaled(w, h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        out = QImage(w, h, QImage.Format_ARGB32_Premultiplied)
+        out.fill(Qt.transparent)
+        q = QPainter(out)
+        q.drawImage(0, 0, small)
+        q.setCompositionMode(QPainter.CompositionMode_SourceIn)
+        q.fillRect(QRect(0, 0, w, h), QColor(color))
+        q.end()
+        pm = QPixmap.fromImage(out)
+    _XIU_PIX_CACHE[key] = pm
+    return pm
+
+
 def _paper_pixmap(w, h):
     """缓存纸面底纹（纸色 + 顶部微光渐变），避免每帧重算全屏渐变。"""
     pm = _PAPER_CACHE.get((w, h))
@@ -237,8 +322,16 @@ def use_builtin_fonts():
 
 
 def palette_for(info: dict) -> dict:
-    """按是否法定假日返回印刷配色（绿色 / 红色主题）。"""
-    if info.get("holiday"):
+    """按「法定假日 / 双休日（调休上班除外）」返回印刷配色（绿色 / 红色主题）。
+
+    v1.9.17：双休日（周六 / 周日）也走红色（用户反馈「现在只有国定假日变成红色，
+    双休日没有变红，让双休日也改为红色」）。`weekend` 由 `engine.get_day_info`
+    依 `date.weekday()` 写入，与 `holiday` 分开——后者还要驱动「法定假日 · xx」文案。
+
+    v1.9.18：**调休上班日**（周末被国务院调为工作日）走**绿色**（用户反馈
+    「今天按照国内是调休，虽然是周末但是是上班的，所以这个需要调整」）。
+    """
+    if (info.get("holiday") or info.get("weekend")) and not info.get("workday"):
         return {"main": QColor("#c62828"), "dark": QColor("#8e1a1a"),
                 "pale": QColor("#f0b9b9"), "stamp_bg": QColor("#fceaea"),
                 "box_bg": QColor("#f8efeb")}
