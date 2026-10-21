@@ -17,10 +17,11 @@ from datetime import date, datetime, timedelta
 from PySide6.QtCore import (QDate, QEasingCurve, QPoint, QRect, QRectF, Qt,
                             QTimer, QVariantAnimation)
 from PySide6.QtGui import (QColor, QFont, QIcon, QPainter, QPen,
-                           QPixmap)
+                           QPixmap, QTransform)
 from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog,
                                QFileDialog,
-                               QGraphicsOpacityEffect, QHBoxLayout, QLabel,
+                               QGraphicsOpacityEffect, QGraphicsScene,
+                               QHBoxLayout, QLabel,
                                QMainWindow, QMenu, QMessageBox, QPushButton,
                                QSystemTrayIcon, QVBoxLayout, QWidget)
 
@@ -51,6 +52,7 @@ from ui.theme import (  # noqa: F401
 from ui.page import CalendarPage  # noqa: F401  兼容再导出
 from ui.agenda import AgendaPanel, AgendaExportDialog, AgendaImportDialog  # noqa: F401
 from ui.dialogs import BaziDialog, SanqingDialog  # noqa: F401  兼容再导出
+from ui.zoom import ScaleGrip, ZoomView
 
 
 _AUTOSTART_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -168,17 +170,21 @@ class MainWindow(QMainWindow):
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
         self._taskbar_mode = True          # 目标态：True＝任务栏有按钮
         margin = 8
-        self.setFixedSize(CalendarPage.PAGE_W + margin * 2,
-                          CalendarPage.PAGE_H + AgendaPanel.PANEL_H + margin * 2 + 4)
 
-        central = QWidget()
-        central.setStyleSheet("background:#f3f0e6;")   # 与叠页纸色一致（去掉深色外框）
-        self.setCentralWidget(central)
-        v = QVBoxLayout(central)
+        # ---- 整窗等比缩放宿主（v1.9.27）----
+        # 结构：board（逻辑像素画布，装 page + 两个面板，布局一行未改）
+        #        → QGraphicsProxyWidget → QGraphicsView（按 _scale 做场景变换）
+        # 逻辑尺寸与 v1.9.26 的窗口尺寸公式逐项一致 ⇒ scale=1.0 时像素级不变。
+        # 缩放只发生在「场景 → 视口」这一层：page 的绝对坐标、面板的 QSS px、
+        # 所有命中矩形都保持原值，事件由视图反变换，故功能与布局零影响。
+        self.board = QWidget()
+        self.board.setStyleSheet("background:#f3f0e6;")   # 与叠页纸色一致（去掉深色外框）
+        v = QVBoxLayout(self.board)
         v.setContentsMargins(margin, margin, margin, margin)
         v.setSpacing(4)
 
         self.page = CalendarPage()
+        self.page.host_window = self      # 场景代理下 window() 断链，注入真窗口（v1.9.27）
         v.addWidget(self.page, 0, Qt.AlignHCenter)
 
         self.agenda_month = AgendaPanel(mode="month")
@@ -188,6 +194,19 @@ class MainWindow(QMainWindow):
         self.agenda_day.theme_info = self.page.info
         self.agenda_day._sync_body()   # theme_info 注入后刷新 day 正文（日期键依赖它）
         v.addWidget(self.agenda_day, 0, Qt.AlignHCenter)
+
+        self._scene = QGraphicsScene(self)
+        self._proxy = self._scene.addWidget(self.board)
+        self._proxy.setPos(0, 0)
+        self._view = ZoomView(self)
+        self._view.setScene(self._scene)
+        self.setCentralWidget(self._view)
+
+        # 左右下角的小三角缩放手柄（悬停淡入，拖动 = 等比缩放）
+        self._grip_bl = ScaleGrip(self, "bl")
+        self._grip_br = ScaleGrip(self, "br")
+        self._scale = 1.0
+        self._scale_drag = None
 
         # ---- 状态 ----
         self.settings = self._load_settings()
@@ -201,6 +220,12 @@ class MainWindow(QMainWindow):
                                                 self.settings.get("agenda_visible", True))
         self._day_visible = self.settings.get("day_visible",
                                               self.settings.get("agenda_visible", True))
+        # 整窗缩放比（v1.9.27）：记忆上次拖拽结果，缺省 100%
+        try:
+            self._scale = float(self.settings.get("ui_scale", 1.0) or 1.0)
+        except (TypeError, ValueError):
+            self._scale = 1.0
+        self._scale = max(self.MIN_SCALE, min(self._scale, self.MAX_SCALE))
         # 已录入八字：生肖框自动联动八字年支生肖（v1.9.3）
         _bx_sx = (self.bazi or {}).get("shengxiao")
         if _bx_sx:
@@ -260,14 +285,98 @@ class MainWindow(QMainWindow):
         self.agenda_month.setVisible(self._month_visible)
         self.agenda_day.setVisible(self._day_visible)
 
-    def _apply_window_height(self):
+    def _logical_size(self):
+        """逻辑像素画布尺寸。
+
+        公式与 v1.9.26 的 `setFixedSize(PAGE_W+16, PAGE_H+16+4+面板)` 逐项一致，
+        保证 scale=1.0 时窗口尺寸、页面位置与旧版像素级相同。
+        """
         margin = 8
         h = CalendarPage.PAGE_H + margin * 2 + 4
         if self._month_visible:
             h += AgendaPanel.PANEL_H
         if self._day_visible:
             h += AgendaPanel.PANEL_H
-        self.setFixedSize(CalendarPage.PAGE_W + margin * 2, h)
+        return CalendarPage.PAGE_W + margin * 2, h
+
+    def _apply_geometry(self):
+        """按「逻辑画布 × 缩放比」重算画布、场景、视图与窗口尺寸。"""
+        lw, lh = self._logical_size()
+        s = self._scale
+        self.board.setFixedSize(lw, lh)
+        self._scene.setSceneRect(QRectF(0, 0, lw, lh))
+        self._view.setTransform(QTransform().scale(s, s))
+        w = max(1, int(round(lw * s)))
+        h = max(1, int(round(lh * s)))
+        self._view.setFixedSize(w, h)
+        self.setFixedSize(w, h)
+        self._layout_grips()
+
+    def _apply_window_height(self):
+        """历史入口（面板开关 / 构造期都会调）：改为按当前缩放比重算几何。"""
+        self._apply_geometry()
+
+    # ---------- 角落小三角手柄（v1.9.27） ----------
+    MIN_SCALE = 0.60
+    MAX_SCALE = 2.00
+
+    def scale_percent(self):
+        return int(round(self._scale * 100))
+
+    def _max_scale(self):
+        """上限：屏幕装得下为准（窗口本来就比屏幕高时，至少允许停在 100%）。"""
+        lw, lh = self._logical_size()
+        g = self._avail_geo()
+        room = min(g.width() / float(lw), g.height() / float(lh))
+        return max(1.0, min(self.MAX_SCALE, room))
+
+    def _layout_grips(self):
+        for g in (getattr(self, "_grip_bl", None), getattr(self, "_grip_br", None)):
+            if g is None:
+                continue
+            x = 1 if g.corner == "bl" else self.width() - 1 - g.width()
+            g.move(x, self.height() - 1 - g.height())
+            g.raise_()
+
+    def _is_scaling(self):
+        return self._scale_drag is not None
+
+    def _begin_scale_drag(self, corner, gpos):
+        self._scale_drag = {"corner": corner, "g": QPoint(gpos),
+                            "pos": QPoint(self.x(), self.y()),
+                            "w": self.width(), "h": self.height(),
+                            "scale": self._scale}
+
+    def _continue_scale_drag(self, gpos):
+        d = self._scale_drag
+        if not d:
+            return
+        dx = gpos.x() - d["g"].x()
+        dy = gpos.y() - d["g"].y()
+        w0, h0 = float(d["w"]), float(d["h"])
+        if d["corner"] == "br":
+            kw, kh = (w0 + dx) / w0, (h0 + dy) / h0
+        else:
+            kw, kh = (w0 - dx) / w0, (h0 - dy) / h0
+        # 只取「变化更明显的那一轴」的系数 ⇒ 严格等比，另一轴由系数反推
+        k = kw if abs(kw - 1.0) >= abs(kh - 1.0) else kh
+        s = max(self.MIN_SCALE, min(d["scale"] * k, self._max_scale()))
+        if abs(s - self._scale) > 1e-4:
+            self._scale = s
+            self._apply_geometry()
+        if d["corner"] == "br":
+            self.move(d["pos"].x(), d["pos"].y())          # 锚定左上角
+        else:
+            self.move(d["pos"].x() + d["w"] - self.width(), d["pos"].y())   # 锚定右上角
+
+    def _end_scale_drag(self):
+        if not self._scale_drag:
+            return
+        self._scale_drag = None
+        for g in (getattr(self, "_grip_bl", None), getattr(self, "_grip_br", None)):
+            if g is not None and not g.underMouse():
+                g._fade_to(0.0)
+        self._save_settings()
 
     def _toggle_panel(self, which: str):
         if which == "month":
@@ -300,6 +409,7 @@ class MainWindow(QMainWindow):
                            "last_date": self.page.info["date"].isoformat(),
                            "month_visible": self._month_visible,
                            "day_visible": self._day_visible,
+                           "ui_scale": round(self._scale, 3),
                            "win_pos": [self.x(), self.y()],
                            "autostart": self.settings.get("autostart", False)}, f,
                           ensure_ascii=False)
@@ -480,17 +590,39 @@ class MainWindow(QMainWindow):
         self.agenda_day.refresh_current()
         self._save_settings()
 
+    def _page_rect_in_window(self):
+        """页面在**窗口坐标**中的矩形（= 画布内位置 × 当前缩放比）。"""
+        s = self._scale
+        p = self.page.mapTo(self.board, QPoint(0, 0))
+        return QRect(int(round(p.x() * s)), int(round(p.y() * s)),
+                     max(1, int(round(self.page.width() * s))),
+                     max(1, int(round(self.page.height() * s))))
+
     def _animate_page(self, mode, direction=1):
         """翻页 / 撕页动画：抓取当前页快照，滑动 + 渐隐。"""
         if self._anim_label:
+            # v1.9.27：连点翻页时旧动画还在跑 —— 只 deleteLater 旧快照会让它的
+            # tick 继续访问已销毁的 QGraphicsOpacityEffect（控制台刷 RuntimeError），
+            # 故先把旧动画停掉。
+            if getattr(self, "_anim", None) is not None:
+                self._anim.stop()
             self._anim_label.deleteLater()
             self._anim_label = None
         pix = self.page.grab()
         lab = QLabel(self)
+        # v1.9.27：整窗缩放后，动画快照必须落在「窗口坐标」里 ——
+        # 逻辑坐标 × _scale，位图同样按缩放后的尺寸重采样（HiDPI 下乘 dpr 保持锐利）。
+        rect = self._page_rect_in_window()
+        dpr = pix.devicePixelRatio() or 1.0
+        if self._scale != 1.0 or dpr != 1.0:
+            pix = pix.scaled(int(round(rect.width() * dpr)),
+                             int(round(rect.height() * dpr)),
+                             Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            pix.setDevicePixelRatio(dpr)
         lab.setPixmap(pix)
-        start = self.page.mapTo(self, QPoint(0, 0))
+        start = rect.topLeft()
         lab.move(start)
-        lab.resize(self.page.size())
+        lab.resize(rect.size())
         lab.show()
         self._anim_label = lab
 
@@ -504,10 +636,12 @@ class MainWindow(QMainWindow):
         anim.setEndValue(1.0)
         anim.setEasingCurve(QEasingCurve.OutCubic)
 
+        s = self._scale
+
         def on_tick(t, lab=lab, opacity=opacity):
             opacity.setOpacity(1.0 - t)
-            dy = t * (self.page.height() + 60) if mode == "tear" else t * 40 * direction
-            dx = t * 160 * direction if mode == "slide" else t * 24
+            dy = t * (rect.height() + 60 * s) if mode == "tear" else t * 40 * s * direction
+            dx = t * 160 * s * direction if mode == "slide" else t * 24 * s
             lab.move(start + QPoint(int(dx), int(dy)))
 
         anim.valueChanged.connect(on_tick)
@@ -695,19 +829,38 @@ class MainWindow(QMainWindow):
 
 
     # ---------- 无边框拖动 ----------
+    # v1.9.27：窗口中央换成了 QGraphicsView，视口内的空白处按下不会冒泡到本窗口，
+    # 故把拖动抽成三个入口，由 ZoomView 在「场景没接住按下」时回调（同一套状态）。
+    def _begin_window_drag(self, gpos):
+        self._drag_pos = QPoint(gpos) - self.frameGeometry().topLeft()
+
+    def _is_window_dragging(self):
+        return self._drag_pos is not None
+
+    def _continue_window_drag(self, gpos):
+        if self._drag_pos is not None:
+            self.move(QPoint(gpos) - self._drag_pos)
+
+    def _end_window_drag(self):
+        self._drag_pos = None
+
     def mousePressEvent(self, ev):
         if ev.button() == Qt.LeftButton:
-            self._drag_pos = ev.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            self._begin_window_drag(ev.globalPosition().toPoint())
         super().mousePressEvent(ev)
 
     def mouseMoveEvent(self, ev):
         if ev.buttons() & Qt.LeftButton and self._drag_pos:
-            self.move(ev.globalPosition().toPoint() - self._drag_pos)
+            self._continue_window_drag(ev.globalPosition().toPoint())
         super().mouseMoveEvent(ev)
 
     def mouseReleaseEvent(self, ev):
-        self._drag_pos = None
+        self._end_window_drag()
         super().mouseReleaseEvent(ev)
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        self._layout_grips()
 
     # ---------- 窗口位置：记忆 / 贴边吸附 / 初始化 ----------
     SNAP_PX = 14          # 距屏幕工作区边缘 ≤14px 时吸附贴边（只贴边，绝不隐藏）

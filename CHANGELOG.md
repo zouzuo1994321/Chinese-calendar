@@ -4,6 +4,47 @@
 
 ## 版本历史
 
+### v1.9.27 (Build 2610210028) — 2026-10-21
+
+本轮一项，来自用户需求：**左右下角各加一枚小三角，鼠标移过去才显示，按住可对软件做等比例缩放（不影响功能与布局）**。
+
+- **① 三角手柄（`ui/zoom.py::ScaleGrip`）**：
+  - 左右下角各一枚，命中区 **22×22**、三角直角边 **13px**，紧贴窗口角（内缩 1px）；默认 `alpha=0` **完全不可见**，鼠标移入 `140ms` 淡入到 0.9，移出淡出；拖动中不淡出。
+  - 光标按方向给：左下 `SizeBDiagCursor`、右下 `SizeFDiagCursor`；悬停时 tooltip 显示「按住拖动：等比缩放（当前 NN%）」。
+  - 墨色 `#6e6857`（纸面中性墨，红 / 绿主题都压得住），只在角落画直角三角形 —— 探针实测墨迹 **91/484 px**（≈13²/2，含抗锯齿），左上 11×11 全空。
+- **② 等比缩放（`ZoomView` + 场景变换）**：
+  - **为什么不能「把控件尺寸乘系数」**：UI 是「520×841 的自绘页（`paintEvent` 里全是绝对坐标）+ 两个 QSS 面板（字号与按钮高度写在 styleSheet 的 px 里）」的固定像素组合 —— 手动改尺寸只会让自绘页画出框外、QSS 控件纹丝不动，布局必崩。
+  - **做法**：窗口中央由裸 `QVBoxLayout` 改为 **`board`（逻辑画布）→ `QGraphicsProxyWidget` → `ZoomView`（`QTransform().scale(s, s)`）**。page 与面板**逻辑尺寸一个未改**（520×841 / 520×178/536×1217），布局代码零改动；事件坐标由视图自动反变换 ⇒ 点击、悬停提示、手型光标、输入法全部走原路径。
+  - **几何**：窗口 = `round(逻辑尺寸 × s)`；`s ∈ [0.60, 2.00]` 且以**屏幕可容纳**为上限（窗口本来就比屏幕高时至少允许停在 100%）。右下角拖动**锚定左上角**、左下角**锚定右上角**；两轴取「变化更明显的那一轴」的系数反推另一轴 ⇒ **严格等比**（实测宽高比与逻辑比差 < 0.001）。
+  - **记忆**：比例写入 `settings.json` 的 `ui_scale`（默认 1.0），启动/面板开关后一律按「逻辑高度 × s」重算。
+- **③ 顺带修掉的两处副作用（都由场景代理引出，必须一起修）**：
+  - **标题行拖动失效**：代理下 `page.window()` 返回的是**画布本身**（`isWindow()` 竟为 `True`、`frameGeometry()` 落在原点），拿它 `move()` 只会把画布在场景里挪位、窗口纹丝不动 → 改为由 `MainWindow` 注入 `page.host_window`，`_host_window()` 优先取它。
+  - **连点翻页报错**：旧快照只 `deleteLater()` 而旧动画仍在跑，`on_tick` 访问已销毁的 `QGraphicsOpacityEffect` → 控制台刷 `RuntimeError`；改为起新动画前先 `self._anim.stop()`。
+- **④ 翻页 / 撕页动画适配缩放**：动画快照改用 `_page_rect_in_window()`（逻辑页面矩形 × s）定位，位图按缩放后尺寸重采样（HiDPI 下乘 `dpr` 保锐利），位移量一并乘 `s` ⇒ 80% / 130% 下动画不再错位。
+- **验证**：`verify_ui.py` **250/250 → 260/260**（新增 `[29]` 组 10 条：`ui/zoom.py` 常量、构造期场景宿主、`host_window` 注入、两枚手柄贴角且默认不可见、80% 窗口尺寸与等比、80% 下点「下一页」仍命中、恢复 100% 回旧尺寸、两个探针齐备）✓ · **新增** `zoom_probe.py`（离屏）**42/42** ✓ · **新增** `zoom_real_probe.py`（真机真实鼠标注入）**15/15** ✓ · `probe_fit.py` 14/14 ✓ · `probe_gua.py` 9/9 ✓ · `probe_holidays.py` 17/17 ✓ · `probe_bazi_prof.py` 17/17 ✓ · `probe_bazi_scale.py` 通过（0/1825 越界）✓ · `ui_agenda_probe.py` 43/43 ✓ · `agenda_checks.py` 34/34 ✓ · `test_process.py` 18/18 ✓ · `geom_probe.py` 通过 ✓ · `font_weight_probe.py`（真机）9/9 ✓ · `window_mode_probe.py`（真机）17/17 ✓ · `xiu28` 自检 28/28 ✓ · `pyflakes`（改动文件）零问题 ✓。
+- **真机实测（zoom_real_probe）**：`0.85 → 1.055` 拖拽 `456×1034 → 566×1284`，左上角 (260,40) 不动；左下拖拽 `456×1034 → 546×1239`，右缘 716 不动；标题行拖动窗口位移 70px 且缩放比不变；页面悬停（卦象框 / 建议卡）与手柄淡入淡出全部正常。
+- **改动文件**：`ui/zoom.py`（新增：`ZoomView` / `ScaleGrip`）、`ui_main.py`（场景宿主 + 手柄 + `_logical_size` / `_apply_geometry` / `_max_scale` / 拖拽三件套 / `_page_rect_in_window` / `ui_scale` 持久化 / 动画修错）、`ui/page.py`（`host_window` + `_host_window()`，标题拖动两处改用它）、`calendar_app/version.py`（`1.9.27` / `2610210028`）、`tools/dev_checks/verify_ui.py`（`[29]` 组 10 条 + 强制 100% + 版本断言）、`tools/dev_checks/zoom_probe.py`（新增）、`tools/dev_checks/zoom_real_probe.py`（新增）、`README.md`（功能表第 20 行 / 使用教程 / 目录结构 / 版本记录 / 徽章）、`CHANGELOG.md`。
+
+### v1.9.26 (Build 2610140027) — 2026-10-14
+
+本轮为用户要求的**工程目录整理 + 源码封存 + README 按模板改版**，**应用行为零变化**（纯路径与文档层重构）。
+
+- **① 图片素材全部集中到 `assets/`（用户要求「基础图片素材放到一起，方便上传 GitHub」）**：
+  - **搬迁清单**：项目根的 `二十八星宿/`、`龙凤/`、`生肖/`、`图标/`、`祖师爷/` 五个子目录，以及散在根上的 `八卦.png`、`logo.png`、`logo.ico`、`logo-2.png`，**全部移入 `assets/`**；`.psd` 设计源随各自素材组保留（`assets/龙凤/龙凤.psd` 等），由 `.gitignore` 的 `*.psd` 排除；v1.9.10 之前的旧 logo 备份移入 `assets/_backup/logo_prev_1.9.10/`（同样不入库）。
+  - **代码同步**：`ui/theme.py` 的素材路径块**重构为单一 `_ASSETS` 根** —— 原来 `_ASSET_DIR`（祖师爷）走 `_BASE`、`_ROOT_DIR` 走 `_MEIPASS` 两套并行分支，源码态其实同为工程根、frozen 态同为 `_MEIPASS`，属重复；现统一为 `_ROOT_DIR/assets`，`IMG_BAGUA` / `IMG_LOGO` / `_LF_DIR` / `XIU_DIR` / `_ICON_DIR` / `_ZODIAC_DIR` 全部由它派生。`main.py::_logo_path()` 同步加 `assets/` 一级。**对外符号名一个未改**（`IMG_LOGO` / `_ZODIAC_DIR` / `XIU_DIR` … 全部保持原名），故 `ui/page.py` / `ui/dialogs.py` / `ui_main.py` / `tools/split_ui.py` 等**零改动**。
+  - **打包同步**：`农历日历.spec` 的 `datas` 目标路径全部加 `assets/` 前缀（`('assets/二十八星宿/*.png', 'assets/二十八星宿')` 等），`icon` 改 `assets/logo.ico`。
+  - **自检**：素材解析自检 **12/12 通过**（logo / 八卦 / 祖师爷 / 香炉 / 星图目录 / 生肖目录 / 龙凤目录 / 图标目录 / 龙凤取图 / 三个联系图标 / logo.ico 全部命中；星图索引 **28 项**、键集与 `XIU28` 完全一致；`xiu_pixmap('角', 红)` 43×45、`xiu_pixmap('壁', 绿)` 44×45 均非空）。
+- **② README 截图改 `docs/screenshots/` 文件引用（用户按微博 bot 模板选定）**：
+  - **决策**：用户在「文件引用（模板样式）/ 保留 base64 内嵌 / 两者都要」中**选定文件引用**。这**逆转了 v1.8.8 的要求**（当时要求 base64 内嵌防图片丢失）；现改为随仓库提交 `docs/screenshots/`，README 从 **2,258,120 B → 45,691 B（−97.9%）**。
+  - **机制**：`verify_ui.py::_embed_shots_to_readme()` / `_embed_xiu_shots()` 由「base64 内嵌」改为「整节写相对路径引用」，**保留 v1.9.12 起的整节重建策略**（正则定位小节至下一个 `---`，被外部改回占位文字也能自愈）。`[10]` / `[10b]` 断言同步改写为「文件引用存在 + 全文 `data:image/png;base64,` 计数为 0」。
+  - **小节改名**：`## 📸 真实截图` → `## 🖼 界面预览`（对齐模板命名）。
+- **③ README 整体按模板框架重写**：参照 `【26-11】微博bot小助手（正式版）/README.md` 的框架重排为 —— 居中头部（logo + 标题 + 徽章 + 导航锚点）→ 引言块（含版本号规则）→ `✨ 功能特性`（改为 19 行编号表）→ `🖼 界面预览` → `🌌 当日二十八宿星图` → `🚀 快速开始`（方式一 exe / 方式二源码 / 自己打包）→ `📖 使用教程`（6 步）→ `🔤 内置字体` → `📜 宜忌数据口径与更新周期` → `🗂 目录结构`（改为 `assets/` 新结构）→ `🗂 数据说明`（新增）→ `🧪 开发校验` → `⚠️ 免责声明`（新增）→ `📄 许可证` → `📮 联系作者` → `📌 版本迭代记录`（新增 v1.9.26 行）。
+- **④ `history/` 留档规则确立（用户要求，已写入 memory）**：`history/` 下**每次版本更新都放最新的版本** —— 本次新增 `history/源码_v1.9.26_2610140027.zip`（源码快照，排除 `build/` `dist/` `history/` `__pycache__/` `.workbuddy/`）。
+- **⑤ 目录精简**：删除 `build/`（293 MB，PyInstaller 中间产物，可全量重打）与散落各处的 `__pycache__/`；`history/settings.json`（exe 误跑产生的运行期数据）与 `history/logo_prev_1.9.10/` 分别删除 / 移入 `assets/_backup/`；`docs/screenshots/` **只留 README 引用的 6 张图**，4 张历史修复对比图移 `docs/figures/`。
+- **验证**：`verify_ui.py` **249/249 → 250/250**（新增 `[3]` 组 1 条：spec datas 目标路径须为 `assets/...` 前缀，5 个 token 全检）✓ · `probe_fit.py` 14/14 ✓ · `probe_gua.py` 9/9 ✓ · `probe_holidays.py` 17/17 ✓ · `probe_bazi_prof.py` 17/17 ✓ · `probe_bazi_scale.py` 通过（0/1825 越界）✓ · `ui_agenda_probe.py` 43/43 ✓ · `agenda_checks.py` 34/34 ✓ · `test_process.py` 18/18 ✓ · `geom_probe.py` 通过 ✓ · `font_weight_probe.py`（真机）9/9 ✓ · `window_mode_probe.py`（真机）17/17 ✓ · `calendar_app/xiu28.py` 自检 28/28 线稿连通 ✓ · `pyflakes`（改动文件）零问题 ✓。
+- **改动文件**：`ui/theme.py`（素材路径块重构）、`main.py`（`_logo_path` 加 `assets/`）、`农历日历.spec`（datas + icon 路径）、`tools/dev_checks/verify_ui.py`（spec token 断言改 `assets/` 前缀、`_embed_shots_to_readme` / `_embed_xiu_shots` 改文件引用、`[10]`/`[10b]` 断言改写、`[27]` 素材路径文案）、`tools/dev_checks/shot_xiu.py`（注释）、`calendar_app/xiu28.py`（docstring 路径）、`calendar_app/version.py`（`1.9.26` / `2610140027`）、`README.md`（按模板重写 + 截图改文件引用 + 250/250）、`.gitignore`（新增 `assets/_backup/`）、`CHANGELOG.md`。
+- **交付图**：`docs/screenshots/` 6 张（4 张主页图由 `verify_ui.py` 离屏重渲，2 张星图由 `shot_xiu.py` **真机**重渲 —— 后者必须真机，因「壁水獝」的獝 U+735D 离屏会成豆腐块）。
+
 ### v1.9.25 (Build 2610100026) — 2026-10-10
 
 本轮一项，来自用户反馈：**分数与「本日运势」行偏高**（原文「分数 和 本日运势 偏高，向下移动5px」）。

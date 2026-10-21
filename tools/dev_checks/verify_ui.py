@@ -12,7 +12,8 @@ os.chdir(_ROOT)
 
 from datetime import date, timedelta
 from PIL import Image
-from PySide6.QtCore import QRect, Qt
+from PySide6.QtCore import QPoint, QRect, Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 import ui_main
@@ -32,6 +33,10 @@ def ck(name, cond, detail=""):
 
 app = QApplication(sys.argv)
 win = MainWindow()
+# v1.9.27：整窗缩放比会被记进本机 settings.json，探针不能被它带偏
+# （否则窗口截图尺寸随开发机变化、像素基准全乱）—— 一律按 100% 验。
+win._scale = 1.0
+win._apply_geometry()
 win.show()
 page = win.page
 
@@ -133,7 +138,9 @@ _main = open("main.py", encoding="utf-8").read()
 ck("[3] main.py 中设置了应用级图标", "app.setWindowIcon(QIcon(logo))" in _main)
 ck("[3] 托盘图标来自 logo.png", not win._make_tray_icon().isNull())
 spec = open("农历日历.spec", encoding="utf-8").read()
-for token in ("logo.png", "logo.ico", "龙凤/*.png", "图标/*.png"):
+# v1.9.26：素材集中到 assets/，spec 的 datas 目标路径随之改为 assets/<子目录>
+for token in ("assets/logo.png", "assets/logo.ico", "assets/龙凤/*.png",
+              "assets/图标/*.png", "assets/二十八星宿/*.png"):
     ck("[3] spec 打包资源含 %s" % token, token in spec)
 
 ck("[4] 缓存容器存在", all(hasattr(ui_main, n) for n in
@@ -223,7 +230,7 @@ ck("回归 v1.9.18 调休上班日 → 绿（周末上班不放假）",
    and palette_for({"weekend": True, "workday": False})["main"].name() == "#c62828",
    "用户反馈「今天按照国内是调休，虽然是周末但是是上班的，所以这个需要调整」")
 ck("回归 版本号 v%s / %s" % (APP_VERSION, BUILD_CODE),
-   APP_VERSION == "1.9.25" and BUILD_CODE == "2610100026", VERSION_TITLE)
+   APP_VERSION == "1.9.27" and BUILD_CODE == "2610210028", VERSION_TITLE)
 ck("回归 生肖水印素材齐备",
    all(os.path.exists(os.path.join(_ZODIAC_DIR, "%s（%s）.png" % (s, t)))
        for s in ("龙", "马") for t in ("红", "绿")))
@@ -699,49 +706,53 @@ finally:
     if os.path.exists(_tmp):       # 自清理：不留过程文件
         os.remove(_tmp)
 
-# ---- 把四张截图以 base64 内嵌进 README（避免外链与图片丢失，v1.8.8）----
-# 用户明确要求：「把软件截图直接加入 readme 中避免每次还要外链，并且有图片丢失的可能」。
-# 每次跑 verify_ui 都重渲染截图 → 重嵌 base64，保证 README 里的图永远是最新的。
+# ---- 把四张截图写进 README（v1.9.26 起改文件引用，对齐微博 bot 模板框架）----
+# 用户 2026-10-14 明确选定「文件引用（模板样式）」：README 用 docs/screenshots/ 相对路径，
+# 不再内嵌 base64 —— README 从 2.2 MB 缩到约 45 KB，截图为仓库内受版本管理的真实文件。
+# （v1.8.8 曾要求 base64 内嵌防图片丢失；v1.9.26 改为随仓库提交 docs/screenshots/，
+#  推 GitHub 时连同该目录一起提交即可，模板中亦有同样说明。）
+# 每次跑 verify_ui 都重渲染截图 → 重写小节，保证 README 里的图永远是最新的。
 def _embed_shots_to_readme():
-    """把四张截图以 base64 内嵌进 README 的「真实截图」小节。
+    """把四张截图写进 README 的「界面预览」小节。
 
-    ⚠ v1.9.12：**整节重建**，不再只做 `![alt](url)` 定点替换。
-    原因：曾出现 README 的 `![绿日](data:...)` 被外部（编辑器/格式化）改回**纯占位文字**
+    ⚠ v1.9.12 起的「整节重建」策略保留：不再只做 `![alt](url)` 定点替换。
+    原因：曾出现 README 的 `![绿日](...)` 被外部（编辑器/格式化）改回**纯占位文字**
     `| 绿日 |`，此时定点替换找不到锚点 → 静默跳过 → 四张图永久丢失（`[10]` 会红）。
-    改为用正则定位「## 📸 真实截图 … 至下一个 `---`」整块并重写，无论此前被改成什么样都能自愈。
+    改为用正则定位「## 🖼 界面预览 … 至下一个 `---`」整块并重写，无论此前被改成什么样都能自愈。
     """
-    import re, base64
+    import re
     pairs = [("绿日", "screenshot-green.png"), ("红日", "screenshot-red.png"),
              ("窗口", "screenshot-window.png"), ("高光", "screenshot-sheen.png")]
-    uris = {}
-    for alt, fn in pairs:
-        path = os.path.join("docs", "screenshots", fn)
-        if not os.path.exists(path):
-            print("⚠ 截图缺失，跳过内嵌:", fn)
+    for _alt, fn in pairs:
+        if not os.path.exists(os.path.join("docs", "screenshots", fn)):
+            print("⚠ 截图缺失，跳过写入:", fn)
             return
-        uris[alt] = "data:image/png;base64," + base64.b64encode(
-            open(path, "rb").read()).decode("ascii")
     section = (
-        "## 📸 真实截图\n\n"
+        "## 🖼 界面预览\n\n"
+        "> 以下截图存于仓库 `docs/screenshots/`，与 README 一起提交发布，随仓库版本管理，不会因更新而失效。\n"
+        ">\n"
+        "> （推送到 GitHub 时请连同 `docs/screenshots/` 目录一起提交）\n\n"
         "| 绿日（平日） | 红日（法定假日） |\n"
         "| :----: | :------: |\n"
-        "| ![绿日](%s) | ![红日](%s) |\n\n"
+        "| ![绿日](docs/screenshots/screenshot-green.png) "
+        "| ![红日](docs/screenshots/screenshot-red.png) |\n\n"
         "| 完整窗口（含叠页纸面与边框） | 数字高光流动的瞬间 |\n"
         "| :------------: | :-------: |\n"
-        "| ![窗口](%s) | ![高光](%s) |\n\n"
+        "| ![窗口](docs/screenshots/screenshot-window.png) "
+        "| ![高光](docs/screenshots/screenshot-sheen.png) |\n\n"
         "> 截图由 `tools/dev_checks/verify_ui.py` 离屏渲染真实窗口内容生成，所见即所得。  \n"
         "> 自 v1.8.0 起软件**内置全部字体**（Noto Serif SC / Noto Sans SC 子集），"
         "因此字形在任何 Windows 设备上都完全一致。"
-        % (uris["绿日"], uris["红日"], uris["窗口"], uris["高光"]))
+    )
     src = open("README.md", encoding="utf-8").read()
-    pat = re.compile(r"## 📸 真实截图\n.*?(?=\n---\n)", re.S)
+    pat = re.compile(r"## 🖼 界面预览\n.*?(?=\n---\n)", re.S)
     if pat.search(src):
         src = pat.sub(lambda _m: section, src, count=1)
     else:
         # 兜底：整节定位失败时，退回定点替换（至少保住已有锚点的情况）
         for alt, fn in pairs:
             _p = r'!\[' + re.escape(alt) + r'\]\([^)]*\)'
-            src, n = re.subn(_p, '![' + alt + '](' + uris[alt] + ')', src)
+            src, n = re.subn(_p, '![' + alt + '](docs/screenshots/' + fn + ')', src)
             if n == 0:
                 print("⚠ README 未找到 ![alt] 标记且整节定位失败:", alt)
     open("README.md", "w", encoding="utf-8").write(src)
@@ -750,47 +761,43 @@ _embed_shots_to_readme()
 
 
 def _embed_xiu_shots():
-    """把二十八宿星图两张图以 base64 内嵌进 README 的「当日二十八宿星图」小节（v1.9.22）。
+    """把二十八宿星图两张图写进 README 的「当日二十八宿星图」小节（v1.9.22 起，v1.9.26 改文件引用）。
 
     ⚠ 这两张图**不由本脚本生成**，而由 `tools/dev_checks/shot_xiu.py` 在**真实平台**渲染：
       offscreen 插件不做字体回退，「壁水**獝**」的 獝（U+735D，宿名用字 62 个里唯一
-      不在内置字体子集内的字）在离屏会画成豆腐块。本函数只负责把已生成的图内嵌。
-    ⚠ 顺序：先跑 `shot_xiu.py` 出新图，再跑本脚本 —— 否则内嵌的是旧图（[10b] 会比对不一致）。
+      不在内置字体子集内的字）在离屏会画成豆腐块。本函数只负责把已生成的图写进小节。
+    ⚠ 顺序：先跑 `shot_xiu.py` 出新图，再跑本脚本 —— 否则写进 README 的是旧图（[10b] 会红）。
     """
     import re as _re2
-    import base64 as _b64
     pairs = [("星图", "xiu-panel.png"), ("28 宿", "xiu-28-sheet.png")]
-    uris = {}
-    for alt, fn in pairs:
-        path = os.path.join("docs", "screenshots", fn)
-        if not os.path.exists(path):
-            print("⚠ 二十八宿星图缺失（先跑 tools/dev_checks/shot_xiu.py 生成），跳过内嵌:", fn)
+    for _alt, fn in pairs:
+        if not os.path.exists(os.path.join("docs", "screenshots", fn)):
+            print("⚠ 二十八宿星图缺失（先跑 tools/dev_checks/shot_xiu.py 生成），跳过写入:", fn)
             return
-        uris[alt] = "data:image/png;base64," + _b64.b64encode(
-            open(path, "rb").read()).decode("ascii")
     section = (
         "## 🌌 当日二十八宿星图（v1.9.22 起 · v1.9.24 改用古刻本素材）\n\n"
         "「颜色」卡右侧一格显示**当日值日星宿**：宿名 / 七曜 / 宿禽 / 吉凶 / 四象 / 方位\n"
         "取自 `lunar_python`。星图采用**用户自备的 28 张古刻本 PNG**\n"
-        "（`二十八星宿/`，星点 + 连线 + 图上宿字与日文假名），按当前主题**红 / 绿着色**，\n"
+        "（`assets/二十八星宿/`，星点 + 连线 + 图上宿字与日文假名），按当前主题**红 / 绿着色**，\n"
         "贴图前自动**裁到墨迹包围盒**再等比缩放，故 28 天里星图大小一致、不生参差；\n"
         "下方**仍保留中文三字宿名**（图上小字只作纹样，中文名才是可读信息）。\n"
         "v1.9.23 起星图**不再自绘外框**（本就在「颜色」卡片内，框套框冗余）。\n\n"
         "| 「颜色」卡右侧的星图 | 2026-10-10 起 28 天逐日星图（一屏看全 28 宿） |\n"
         "| :----: | :----: |\n"
-        "| ![星图](%s) | ![28 宿](%s) |\n\n"
+        "| ![星图](docs/screenshots/xiu-panel.png) "
+        "| ![28 宿](docs/screenshots/xiu-28-sheet.png) |\n\n"
         "> 二十八宿 28 日一轮回，故连续 28 天恰好覆盖全部 28 宿（已实测）。\n"
         "> ⚠ 「壁水**獝**」的 獝 (U+735D) 不在内置字体子集内（宿名用字 62 个里唯一缺口），\n"
         "> 真机走系统字体回退、**离屏渲染会成豆腐块** —— 故本图由 `tools/dev_checks/shot_xiu.py` 在\n"
         "> **真实平台**渲染（不要用 offscreen 重出这两张图）。"
-        % (uris["星图"], uris["28 宿"]))
+    )
     src = open("README.md", encoding="utf-8").read()
-    # 标题行允许带后缀（如「（v1.9.22 起）」），否则整节定位失败 → 静默跳过内嵌
+    # 标题行允许带后缀（如「（v1.9.22 起）」），否则整节定位失败 → 静默跳过写入
     pat = _re2.compile(r"## 🌌 当日二十八宿星图[^\n]*\n.*?(?=\n---\n)", _re2.S)
     if pat.search(src):
         src = pat.sub(lambda _m: section, src, count=1)
     else:
-        print("⚠ README 未找到「## 🌌 当日二十八宿星图」小节，跳过内嵌")
+        print("⚠ README 未找到「## 🌌 当日二十八宿星图」小节，跳过写入")
         return
     open("README.md", "w", encoding="utf-8").write(src)
 
@@ -846,41 +853,37 @@ _SHOTS = ("screenshot-red.png", "screenshot-green.png",
 _missing = [s for s in _SHOTS
             if not os.path.exists(os.path.join("docs", "screenshots", s))]
 ck("[10] README 四张截图文件齐备", not _missing, "缺失=%s" % _missing if _missing else "4/4")
-# README 必须把四张图以 base64 data URI 内嵌（v1.8.8：不再用 docs/screenshots/ 外链，
-# 避免图片丢失）。曾经是空占位文字，v1.8.7 改为相对路径，v1.8.8 改为 base64 内嵌。
+# v1.9.26 起改为 docs/screenshots/ **文件引用**（用户 2026-10-14 选定「文件引用（模板样式）」，
+# 对齐微博 bot 模板框架）：README 不再内嵌 base64，从 2.2 MB 缩到约 30 KB。
+# 历史上曾是空占位文字（v1.8.7 修为相对路径，v1.8.8 改 base64 内嵌，v1.9.26 回归文件引用）。
 _readme = open("README.md", encoding="utf-8").read()
 _b64_count = _readme.count("data:image/png;base64,")
-# 用 alt 文本确认四张图都在（base64 内容每次重渲染会变，不能直接当 key）
-_have_alts = all(("![" + a + "](data:image/png;base64,") in _readme
-                 for a in ("绿日", "红日", "窗口", "高光"))
-ck("[10] README 四张截图已 base64 内嵌（非外链 / 非占位文字）",
-   _b64_count >= 4 and _have_alts,
-   "data URI=%d  alt齐=%s" % (_b64_count, _have_alts))
+# 用 alt 文本确认四张图都以正确的相对路径被引用（渲染内容每次会变，不能直接当 key）
+_shot_refs = (("绿日", "screenshot-green.png"), ("红日", "screenshot-red.png"),
+              ("窗口", "screenshot-window.png"), ("高光", "screenshot-sheen.png"))
+_have_alts = all(("![" + a + "](docs/screenshots/" + f + ")") in _readme
+                 for a, f in _shot_refs)
+ck("[10] README 四张截图以 docs/screenshots/ 文件引用（非外链 http / 非占位文字 / 非 base64）",
+   _have_alts and _b64_count == 0 and "![%s](http" % "绿日" not in _readme,
+   "引用齐=%s data URI=%d" % (_have_alts, _b64_count))
 
-# ---- [10b] v1.9.22：README 的「当日二十八宿星图」小节（两张图必须存在且已内嵌）----
+# ---- [10b] v1.9.22：README 的「当日二十八宿星图」小节（两张图必须存在且被引用）----
 # ⚠ 这两张图由 `tools/dev_checks/shot_xiu.py` 在**真实平台**渲染（离屏下「壁水獝」的 獝 会是豆腐块），
-#   本脚本只负责内嵌；因此这里断言「文件存在 + README 里确实是 base64 内嵌 + 不陈旧」。
+#   本脚本只负责写进小节；因此这里断言「文件存在 + README 里确实是文件引用」。
 _XIU_SHOTS = ("xiu-panel.png", "xiu-28-sheet.png")
 _xiu_missing = [s for s in _XIU_SHOTS
                 if not os.path.exists(os.path.join("docs", "screenshots", s))]
 ck("[10b] README 二十八宿星图两张文件齐备（由 tools/dev_checks/shot_xiu.py 真机渲染）",
    not _xiu_missing,
    "缺失=%s" % _xiu_missing if _xiu_missing else "2/2")
-ck("[10b] README 含「当日二十八宿星图」小节且两张图已 base64 内嵌",
+ck("[10b] README 含「当日二十八宿星图」小节且两张图以文件引用",
    "## 🌌 当日二十八宿星图" in _readme
-   and all(("![" + a + "](data:image/png;base64,") in _readme
-           for a in ("星图", "28 宿")),
+   and all(("![" + a + "](docs/screenshots/" + f + ")") in _readme
+           for a, f in (("星图", "xiu-panel.png"), ("28 宿", "xiu-28-sheet.png"))),
    "小节=%s" % ("## 🌌 当日二十八宿星图" in _readme))
-# 防陈旧：README 里内嵌的 base64 必须与磁盘上的当前文件一致（改图后忘了重跑内嵌会红）
-import base64 as _b64_10                                              # noqa: E402
-_stale = []
-for _alt, _fn in (("星图", "xiu-panel.png"), ("28 宿", "xiu-28-sheet.png")):
-    _uri = "data:image/png;base64," + _b64_10.b64encode(
-        open(os.path.join("docs", "screenshots", _fn), "rb").read()).decode("ascii")
-    if _uri not in _readme:
-        _stale.append(_alt)
-ck("[10b] README 内嵌的星图 base64 与磁盘文件一致（不陈旧）",
-   not _stale, "陈旧: %s" % (_stale or "无"))
+ck("[10b] README 全文不再内嵌 base64 截图（v1.9.26 回归文件引用）",
+   _readme.count("data:image/png;base64,") == 0,
+   "data URI=%d" % _readme.count("data:image/png;base64,"))
 
 # ---- [11] 今日成语（v1.8.9）：分段映射 + 居中绘制 + 随主题红绿 ----
 # 用户需求：红框区域（年份行与巨大数字之间的居中空带）按今日分数显示成语，
@@ -1647,7 +1650,7 @@ ck("[27] 宿名正序（东方苍龙 → 北方玄武 → 西方白虎 → 南�
 # v1.9.24：星图改为「用户提供的 300×300 古刻本 PNG」贴图 —— 校验素材侧
 _idx27 = _TH._xiu_index()
 _miss27 = [n for n in _X28 if n not in _idx27]
-ck("[27] v1.9.24 星图素材齐备（`二十八星宿/` 下 28 个宿都有对应 PNG）",
+ck("[27] v1.9.24 星图素材齐备（`assets/二十八星宿/` 下 28 个宿都有对应 PNG）",
    not _miss27, "缺素材: %s（索引共 %d 个）" % (_miss27 or "无", len(_idx27)))
 ck("[27] 素材索引键与二十八宿一一对应（无多余 / 无错位）",
    set(_idx27) == set(_X28), "索引键: %s" % "".join(sorted(_idx27)))
@@ -1893,6 +1896,54 @@ ck("[28] 实测：分数墨迹顶 490、本日运势墨迹顶 494（较 v1.9.24 
    "分数顶 %s / 本日运势顶 %s（期望 490 / 494）" % (_t_s28, _t_z28))
 ck("[28] 实测：值神行未跟随下移（墨迹顶仍为 517）",
    _t_t28 == 517, "值神顶 %s（期望 517）" % (_t_t28,))
+
+
+# ---- [29] 整窗等比缩放（v1.9.27：左右下角小三角 + 场景缩放宿主） ----
+import inspect as _insp29
+from ui.zoom import ScaleGrip as _SG29, ZoomView as _ZV29
+import ui_main as _uim29
+
+ck("[29] ui/zoom.py 提供 ZoomView / ScaleGrip",
+   _ZV29.__name__ == "ZoomView" and _SG29.SIZE == 22,
+   "SIZE=%d LEG=%d" % (_SG29.SIZE, _SG29.LEG))
+_src_init29 = _insp29.getsource(MainWindow.__init__)
+ck("[29] 窗口构造期走场景宿主（board → proxy → ZoomView）",
+   "addWidget(self.board)" in _src_init29
+   and "ZoomView(self)" in _src_init29)
+ck("[29] 页面注入真窗口引用（代理下 window() 会返回画布本身）",
+   page.host_window is win and "host_window" in _insp29.getsource(CalendarPage.mousePressEvent))
+ck("[29] 左右下角各有一个三角手柄且贴角",
+   win._grip_bl.corner == "bl" and win._grip_br.corner == "br"
+   and win._grip_bl.x() <= 2 and win._grip_br.x() + win._grip_br.width() >= win.width() - 2
+   and win._grip_bl.y() + win._grip_bl.height() >= win.height() - 2,
+   "bl=%s br=%s" % (win._grip_bl.geometry(), win._grip_br.geometry()))
+ck("[29] 手柄默认不可见（悬停才淡入）",
+   win._grip_bl._alpha == 0.0 and win._grip_br._alpha == 0.0)
+
+_lw29, _lh29 = win._logical_size()
+win._scale = 0.8
+win._apply_geometry()
+ck("[29] 80% 时窗口 = round(逻辑 × 0.8)，页面逻辑尺寸不变",
+   (win.width(), win.height()) == (int(round(_lw29 * 0.8)), int(round(_lh29 * 0.8)))
+   and (page.width(), page.height()) == (520, 841),
+   "%dx%d（逻辑 %dx%d）" % (win.width(), win.height(), _lw29, _lh29))
+ck("[29] 缩放严格等比（宽高比 = 逻辑宽高比）",
+   abs(win.width() / float(win.height()) - _lw29 / float(_lh29)) < 0.002)
+_c29 = page.btn_next.geometry().center()
+_pl29 = page.mapTo(win.board, _c29)
+_d029 = page.info["date"]
+QTest.mouseClick(win._view.viewport(), Qt.LeftButton, Qt.NoModifier,
+                 QPoint(int(round(_pl29.x() * 0.8)), int(round(_pl29.y() * 0.8))))
+ck("[29] 80% 下点击「下一页」仍命中（事件坐标由视图反变换）",
+   page.info["date"] != _d029, "%s → %s" % (_d029, page.info["date"]))
+win._scale = 1.0
+win._apply_geometry()
+ck("[29] 恢复 100% 后窗口回到旧版尺寸",
+   (win.width(), win.height()) == (_lw29, _lh29))
+_ck_dir29 = os.path.dirname(os.path.abspath(__file__))
+ck("[29] 缩放探针齐备（离屏 zoom_probe + 真机 zoom_real_probe）",
+   os.path.exists(os.path.join(_ck_dir29, "zoom_probe.py"))
+   and os.path.exists(os.path.join(_ck_dir29, "zoom_real_probe.py")))
 
 failed = [n for n, c, _ in R if not c]
 print("\n==== UI 复核 (v%s) ==== total=%d passed=%d failed=%d"

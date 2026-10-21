@@ -7,6 +7,7 @@ build/
 dist/
 
 # ---- 历史版本归档（体积大，不进仓库；正式版走 GitHub Releases）----
+#   history/ 下每次版本更新都放最新的版本（exe + 当期源码快照 zip），仅本地留档
 history/
 
 # ---- 运行期数据（exe 同目录自动生成）----
@@ -21,8 +22,11 @@ tools/_font_src/
 # ---- 本地工作区数据 ----
 .workbuddy/
 
-# ---- 设计源文件（PSD 体积大且非运行必需，需发布时单独归档）----
+# ---- 图片素材（v1.9.26 起集中到 assets/）----
+#   PNG 运行期素材**入库**（随仓库版本管理，README 截图也引用它）；
+#   PSD 设计源与 assets/_backup/ 旧版素材备份体积大且非运行必需，仅本地保留
 *.psd
+assets/_backup/
 
 # ---- Windows 系统垃圾 ----
 Thumbs.db

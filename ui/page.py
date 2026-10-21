@@ -111,6 +111,11 @@ class CalendarPage(QWidget):
         self._day_visible = True
         self._date_press_count = 0
         self._win_drag = None    # 标题行拖动窗口用的偏移
+        # v1.9.27：真窗口引用。整窗缩放把页面装进了 QGraphicsProxyWidget，
+        # parentWidget 链断在代理里 —— `self.window()` 会返回**画布本身**
+        # （isWindow() 竟为 True、frameGeometry 落在原点），拿它去 move() 只会
+        # 把画布在场景里挪位、窗口纹丝不动。故由 MainWindow 注入真窗口。
+        self.host_window = None
         self._hover_advice_key = None   # 当前悬停的建议卡（事业/感情/出行/财务）
         self._hover_advice_rect = None  # 该卡几何，供 tooltip 锚定
         self._dwell_timer = QTimer(self)        # 悬停停留后才弹完整建议
@@ -333,13 +338,17 @@ class CalendarPage(QWidget):
         self.update()
 
     # ---------- 点击区：中间日期 10 连击 / 标题行拖动窗口 / 底部按钮双击开关面板 ----------
+    def _host_window(self):
+        """真顶层窗口（v1.9.27）：优先用 MainWindow 注入的引用，避免代理断链。"""
+        return self.host_window or self.window()
+
     def mousePressEvent(self, ev):
         if ev.button() != Qt.LeftButton:
             return super().mousePressEvent(ev)
         pos = ev.position()
         # 「农历日历」标题行：按住拖动窗口位置
         if self.TITLE_RECT.contains(int(pos.x()), int(pos.y())):
-            w = self.window()
+            w = self._host_window()
             self._win_drag = ev.globalPosition().toPoint() - w.frameGeometry().topLeft()
             return
         # 巨大日期命中区：累计 10 次触发「祭拜三清」
@@ -365,7 +374,7 @@ class CalendarPage(QWidget):
     def mouseMoveEvent(self, ev):
         # 标题行拖动中：跟随鼠标移动窗口
         if self._win_drag is not None and (ev.buttons() & Qt.LeftButton):
-            w = self.window()
+            w = self._host_window()
             w.move(ev.globalPosition().toPoint() - self._win_drag)
             return
         pos = ev.position()

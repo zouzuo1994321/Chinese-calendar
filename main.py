@@ -33,13 +33,17 @@ def _beacon(tag: str) -> None:
 
 
 def _logo_path():
-    """解析打包/源码两种运行方式下的 logo.png 绝对路径。"""
+    """解析打包/源码两种运行方式下的 logo.png 绝对路径。
+
+    v1.9.26：图片素材集中到 `assets/`，源码态为工程根/assets/logo.png，
+    frozen 态为 _MEIPASS/assets/logo.png（与 农历日历.spec 的 datas 映射一致）。
+    """
     if getattr(sys, "frozen", False):
         base = getattr(sys, "_MEIPASS",
                        os.path.dirname(os.path.abspath(sys.executable)))
     else:
         base = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(base, "logo.png")
+    return os.path.join(base, "assets", "logo.png")
 
 
 def main():

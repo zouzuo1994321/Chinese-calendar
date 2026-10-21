@@ -12,10 +12,10 @@ a = Analysis(
     ['main.py'],
     pathex=['.'],
     binaries=[],
-    datas=[('祖师爷/祖师爷.png', '祖师爷'), ('祖师爷/香炉.png', '祖师爷'),
-           ('生肖/*.png', '生肖'), ('八卦.png', '.'), ('logo.png', '.'),
-           ('龙凤/*.png', '龙凤'), ('图标/*.png', '图标'),
-           ('二十八星宿/*.png', '二十八星宿'),   # v1.9.24 二十八宿星图素材（用户提供）
+    datas=[('assets/祖师爷/祖师爷.png', 'assets/祖师爷'), ('assets/祖师爷/香炉.png', 'assets/祖师爷'),
+           ('assets/生肖/*.png', 'assets/生肖'), ('assets/八卦.png', 'assets'), ('assets/logo.png', 'assets'),
+           ('assets/龙凤/*.png', 'assets/龙凤'), ('assets/图标/*.png', 'assets/图标'),
+           ('assets/二十八星宿/*.png', 'assets/二十八星宿'),   # v1.9.24 二十八宿星图素材（用户提供）
            ('fonts/*.ttf', 'fonts')],   # 内置字体（OFL，保证各设备字形一致）
     hiddenimports=hiddenimports,
     hookspath=[],
@@ -46,5 +46,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='logo.ico',
+    icon='assets/logo.ico',
 )

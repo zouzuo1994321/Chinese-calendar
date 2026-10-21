@@ -35,40 +35,32 @@ def settings_path():
         return os.path.join(appdata, "农历日历", "settings.json")
     return p
 
-# 祭拜三清素材（frozen：随包附带于 _MEIPASS/祖师爷；源码：项目根/祖师爷）
-if getattr(sys, "frozen", False):
-    _ASSET_DIR = os.path.join(
-        getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(sys.executable))),
-        "祖师爷")
-else:
-    _ASSET_DIR = os.path.join(_BASE, "祖师爷")
-
-# 生肖剪影素材（frozen：_MEIPASS/生肖；源码：项目根/生肖）
-if getattr(sys, "frozen", False):
-    _ZODIAC_DIR = os.path.join(
-        getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(sys.executable))),
-        "生肖")
-else:
-    _ZODIAC_DIR = os.path.join(_BASE, "生肖")
-IMG_ZUSHIYE = os.path.join(_ASSET_DIR, "祖师爷.png")
-IMG_XIANGLU = os.path.join(_ASSET_DIR, "香炉.png")
-
-# 八卦图素材（frozen：_MEIPASS/八卦.png；源码：项目根/八卦.png）
+# ---- 素材根目录（v1.9.26：全部图片素材集中到 assets/，便于上传 GitHub）----
+# frozen：随包附带于 _MEIPASS/assets；源码：工程根/assets
 if getattr(sys, "frozen", False):
     _ROOT_DIR = getattr(sys, "_MEIPASS",
                         os.path.dirname(os.path.abspath(sys.executable)))
 else:
     _ROOT_DIR = _BASE
-IMG_BAGUA = os.path.join(_ROOT_DIR, "八卦.png")
+_ASSETS = os.path.join(_ROOT_DIR, "assets")
+
+# 祭拜三清素材（祖师爷 / 香炉）
+_ASSET_DIR = os.path.join(_ASSETS, "祖师爷")
+# 生肖剪影素材
+_ZODIAC_DIR = os.path.join(_ASSETS, "生肖")
+IMG_ZUSHIYE = os.path.join(_ASSET_DIR, "祖师爷.png")
+IMG_XIANGLU = os.path.join(_ASSET_DIR, "香炉.png")
+
+# 八卦图素材
+IMG_BAGUA = os.path.join(_ASSETS, "八卦.png")
 # 应用图标（logo.png：用于窗口 / 托盘 / exe 图标）
-IMG_LOGO = os.path.join(_ROOT_DIR, "logo.png")
+IMG_LOGO = os.path.join(_ASSETS, "logo.png")
 # 龙 / 凤 / 云纹剪纸素材（随主题红绿切换）
-_LF_DIR = os.path.join(_ROOT_DIR, "龙凤")
+_LF_DIR = os.path.join(_ASSETS, "龙凤")
 # 二十八宿星图素材（v1.9.24：用户提供的 300×300 古刻本 PNG —— 星点 + 连线 + 宿字 + 日文假名）
-# frozen：随包附带于 _MEIPASS/二十八星宿；源码：项目根/二十八星宿
-XIU_DIR = os.path.join(_ROOT_DIR, "二十八星宿")
+XIU_DIR = os.path.join(_ASSETS, "二十八星宿")
 # 联系作者图标（白底透明，运行时着色为墨色）
-_ICON_DIR = os.path.join(_ROOT_DIR, "图标")
+_ICON_DIR = os.path.join(_ASSETS, "图标")
 IMG_ICON_GITHUB = os.path.join(_ICON_DIR, "github.png")
 IMG_ICON_BILIBILI = os.path.join(_ICON_DIR, "bilibili.png")
 IMG_ICON_WEIBO = os.path.join(_ICON_DIR, "weibo.png")
